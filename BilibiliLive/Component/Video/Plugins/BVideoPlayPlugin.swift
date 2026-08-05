@@ -365,15 +365,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
     /// 与资源加载器选主视频流的逻辑对齐，取出该流各 CDN host 的代表 URL，供起播轻量测速。
     private func primaryCDNCandidates(from info: VideoPlayURLInfo, maxQuality: Int?, streamIndex: Int?) -> [String] {
-        var videos = info.dash.video
-        if Settings.preferAvc {
-            let videosMap = Dictionary(grouping: videos, by: { $0.id })
-            for (key, values) in videosMap {
-                if values.contains(where: { !$0.isHevc }) {
-                    videos.removeAll(where: { $0.id == key && $0.isHevc })
-                }
-            }
-        }
+        var videos = BVideoUrlUtils.applyingCodecPreference(to: info.dash.video)
         if let streamIndex, streamIndex < info.dash.video.count {
             videos = [info.dash.video[streamIndex]]
         } else if let maxQuality {

@@ -11,6 +11,7 @@ import AVFoundation
 import Swifter
 import SwiftyJSON
 import UIKit
+import VideoToolbox
 
 class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate {
     enum URLs {
@@ -323,15 +324,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
         self.preferredHost = preferredHost
         reset()
         hasSubtitle = subtitles.count > 0
-        var videos = info.dash.video
-        if Settings.preferAvc {
-            let videosMap = Dictionary(grouping: videos, by: { $0.id })
-            for (key, values) in videosMap {
-                if values.contains(where: { !$0.isHevc }) {
-                    videos.removeAll(where: { $0.id == key && $0.isHevc })
-                }
-            }
-        }
+        var videos = BVideoUrlUtils.applyingCodecPreference(to: info.dash.video)
 
         // 先过滤黑名单编码（避免后续强制模式选择了被黑名单的流）
         videos = videos.filter { !videoCodecBlackList.contains($0.codecs) }
@@ -545,6 +538,24 @@ private extension BilibiliVideoResourceLoaderDelegate {
 }
 
 enum BVideoUrlUtils {
+    /// 自動模式在硬體可解碼時優先 HEVC，以較低碼率維持同等畫質；使用者開啟
+    /// 「AVC 優先」或裝置沒有 HEVC 硬體解碼時，則在同畫質有 AVC 的前提下回退 AVC。
+    static func applyingCodecPreference(to videos: [VideoPlayURLInfo.DashInfo.DashMediaInfo]) -> [VideoPlayURLInfo.DashInfo.DashMediaInfo] {
+        let preferAvc = Settings.preferAvc || !VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
+        let videosByQuality = Dictionary(grouping: videos, by: \.id)
+
+        return videos.filter { video in
+            guard let sameQualityVideos = videosByQuality[video.id] else { return true }
+            if preferAvc, sameQualityVideos.contains(where: \.isAvc) {
+                return video.isAvc
+            }
+            if !preferAvc, sameQualityVideos.contains(where: \.isHevc) {
+                return video.isHevc
+            }
+            return true
+        }
+    }
+
     static func sortUrls(base: String, backup: [String]?) -> [String] {
         var urls = [base]
         if let backup {
@@ -631,6 +642,10 @@ extension VideoPlayURLInfo.DashInfo.DashMediaInfo {
 
         var seenURLs = Set<String>()
         return (customURLs + originalURLs).filter { seenURLs.insert($0).inserted }
+    }
+
+    var isAvc: Bool {
+        return codecs.starts(with: "avc")
     }
 
     var isHevc: Bool {
