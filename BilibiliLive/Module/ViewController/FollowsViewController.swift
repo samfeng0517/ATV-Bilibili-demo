@@ -43,7 +43,11 @@ extension WebRequest {
         let has_more: Bool
         var videoFeeds: [DynamicFeedData] {
             return items
-                .filter({ $0.aid != 0 || $0.modules.module_dynamic.major?.pgc != nil })
+                .filter({
+                    $0.aid != 0
+                        || $0.modules.module_dynamic.major?.pgc != nil
+                        || $0.modules.module_dynamic.major?.ugc_season != nil
+                })
         }
 
         enum CodingKeys: String, CodingKey {
@@ -84,13 +88,19 @@ struct DynamicFeedData: Codable, PlayableData, DisplayData {
         if let str = modules.module_dynamic.major?.archive?.aid {
             return Int(str) ?? 0
         }
+        if let aid = modules.module_dynamic.major?.ugc_season?.aid {
+            return aid
+        }
         return 0
     }
 
     var cid: Int { return 0 }
 
     var title: String {
-        return modules.module_dynamic.major?.archive?.title ?? modules.module_dynamic.major?.pgc?.title ?? ""
+        return modules.module_dynamic.major?.archive?.title
+            ?? modules.module_dynamic.major?.ugc_season?.title
+            ?? modules.module_dynamic.major?.pgc?.title
+            ?? ""
     }
 
     var ownerName: String {
@@ -98,7 +108,9 @@ struct DynamicFeedData: Codable, PlayableData, DisplayData {
     }
 
     var pic: URL? {
-        return URL(string: modules.module_dynamic.major?.archive?.cover ?? "") ?? modules.module_dynamic.major?.pgc?.cover
+        return URL(string: modules.module_dynamic.major?.archive?.cover ?? "")
+            ?? URL(string: modules.module_dynamic.major?.ugc_season?.cover ?? "")
+            ?? modules.module_dynamic.major?.pgc?.cover
     }
 
     var avatar: URL? {
@@ -112,7 +124,9 @@ struct DynamicFeedData: Codable, PlayableData, DisplayData {
     var overlay: DisplayOverlay? {
         var leftItems = [DisplayOverlay.DisplayOverlayItem]()
         var rightItems = [DisplayOverlay.DisplayOverlayItem]()
-        if let stat = modules.module_dynamic.major?.archive?.stat {
+        let major = modules.module_dynamic.major
+        let stat = major?.archive?.stat ?? major?.ugc_season?.stat
+        if let stat {
             if let play = stat.play {
                 leftItems.append(DisplayOverlay.DisplayOverlayItem(icon: "play.rectangle", text: play == "0" ? "-" : "\(play)"))
             }
@@ -120,10 +134,12 @@ struct DynamicFeedData: Codable, PlayableData, DisplayData {
                 leftItems.append(DisplayOverlay.DisplayOverlayItem(icon: "list.bullet.rectangle", text: danmaku == "0" ? "-" : "\(danmaku)"))
             }
         }
-        if let durationText = modules.module_dynamic.major?.archive?.duration_text {
+        if let durationText = major?.archive?.duration_text ?? major?.ugc_season?.duration_text {
             rightItems.append(DisplayOverlay.DisplayOverlayItem(icon: nil, text: durationText))
         }
-        return DisplayOverlay(leftItems: leftItems, rightItems: rightItems)
+        let badgeText = major?.ugc_season?.badge?.text
+        let badge = badgeText.map { DisplayOverlay.DisplayOverlayBadge(color: nil, text: $0) }
+        return DisplayOverlay(leftItems: leftItems, rightItems: rightItems, badge: badge)
     }
 
     let type: String
@@ -153,6 +169,7 @@ struct DynamicFeedData: Codable, PlayableData, DisplayData {
             struct Major: Codable, Hashable {
                 let archive: Archive?
                 let pgc: Pgc?
+                let ugc_season: UgcSeason?
 
                 struct Archive: Codable, Hashable {
                     let aid: String?
@@ -165,6 +182,39 @@ struct DynamicFeedData: Codable, PlayableData, DisplayData {
                     struct Stat: Codable, Hashable {
                         let danmaku: String?
                         let play: String?
+                    }
+                }
+
+                struct UgcSeason: Codable, Hashable {
+                    let aid: Int?
+                    let cover: String?
+                    let title: String?
+                    let duration_text: String?
+                    let stat: Archive.Stat?
+                    let badge: Badge?
+
+                    struct Badge: Codable, Hashable {
+                        let text: String?
+                    }
+
+                    enum CodingKeys: String, CodingKey {
+                        case aid, cover, title, duration_text, stat, badge
+                    }
+
+                    init(from decoder: Decoder) throws {
+                        let container = try decoder.container(keyedBy: CodingKeys.self)
+                        if let intVal = try? container.decodeIfPresent(Int.self, forKey: .aid) {
+                            aid = intVal
+                        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .aid) {
+                            aid = Int(strVal)
+                        } else {
+                            aid = nil
+                        }
+                        cover = try container.decodeIfPresent(String.self, forKey: .cover)
+                        title = try container.decodeIfPresent(String.self, forKey: .title)
+                        duration_text = try container.decodeIfPresent(String.self, forKey: .duration_text)
+                        stat = try container.decodeIfPresent(Archive.Stat.self, forKey: .stat)
+                        badge = try container.decodeIfPresent(Badge.self, forKey: .badge)
                     }
                 }
 
