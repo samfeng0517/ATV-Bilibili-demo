@@ -208,7 +208,7 @@ class SettingsViewController: UIViewController {
                         self?.confirmClearRemoteCDNNodes()
                     }
                 }
-                Actions(title: "最高画质", message: "4k以上需要大会员",
+                Actions(title: "偏好畫質", message: "影片未提供偏好畫質時，會自動選擇較低一級的最高畫質；自動模式會依網路狀況調整。4K 以上需要大會員。",
                         current: Settings.mediaQuality.desp,
                         options: MediaQualityEnum.allCases,
                         optionString: MediaQualityEnum.allCases.map({ $0.desp }))
@@ -222,7 +222,9 @@ class SettingsViewController: UIViewController {
                 {
                     Settings.mediaPlayerSpeed = $0
                 }
-                Toggle(title: "Avc优先(卡顿尝试开启)", setting: Settings.preferAvc, onChange: Settings.preferAvc.toggle())
+                if !BVideoUrlUtils.supportsHEVCHardwareDecoding {
+                    Toggle(title: "AVC 優先（卡頓時可嘗試）", setting: Settings.preferAvc, onChange: Settings.preferAvc.toggle())
+                }
                 Toggle(title: "无损音频和杜比全景声", setting: Settings.losslessAudio, onChange: Settings.losslessAudio.toggle())
                 Toggle(title: "匹配视频内容", setting: Settings.contentMatch, onChange: Settings.contentMatch.toggle())
                 Toggle(title: "仅在HDR视频匹配视频内容", setting: Settings.contentMatchOnlyInHDR, onChange: Settings.contentMatchOnlyInHDR.toggle())

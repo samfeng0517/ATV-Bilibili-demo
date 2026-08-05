@@ -13,6 +13,28 @@ import SwiftyJSON
 import UIKit
 import VideoToolbox
 
+enum BVideoQualitySelection: Equatable {
+    case automatic
+    case preferred(Int)
+    case stream(quality: Int, index: Int)
+
+    static var settingsDefault: BVideoQualitySelection {
+        if let preferredQn = Settings.mediaQuality.preferredQn {
+            return .preferred(preferredQn)
+        }
+        return .automatic
+    }
+
+    var qualityId: Int? {
+        switch self {
+        case .automatic:
+            return nil
+        case let .preferred(quality), let .stream(quality, _):
+            return quality
+        }
+    }
+}
+
 class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate {
     enum URLs {
         static let customScheme = "atv"
@@ -318,55 +340,16 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
         playlists.append(playList)
     }
 
-    func setBilibili(info: VideoPlayURLInfo, subtitles: [SubtitleData], aid: Int, maxQuality: Int? = nil, streamIndex: Int? = nil, preferredHost: String? = nil) {
+    func setBilibili(info: VideoPlayURLInfo, subtitles: [SubtitleData], aid: Int, qualitySelection: BVideoQualitySelection = .settingsDefault, preferredHost: String? = nil) {
         playInfo = info
         self.aid = aid
         self.preferredHost = preferredHost
         reset()
         hasSubtitle = subtitles.count > 0
-        var videos = BVideoUrlUtils.applyingCodecPreference(to: info.dash.video)
+        var videos = BVideoUrlUtils.selectingVideos(from: info.dash.video, selection: qualitySelection)
 
         // 先过滤黑名单编码（避免后续强制模式选择了被黑名单的流）
         videos = videos.filter { !videoCodecBlackList.contains($0.codecs) }
-
-        // 智能画质模式：
-        // 1. 如果用户手动选择了具体的流（streamIndex 不为 nil），只使用该流
-        // 2. 如果用户手动选择了画质（maxQuality 不为 nil），只保留该画质的流（强制模式）
-        // 3. 如果是默认模式，使用设置限制并保留多级画质作为后备（自适应模式）
-        if let streamIndex = streamIndex, streamIndex < info.dash.video.count {
-            // 用户选择了具体的流，直接使用该流
-            videos = [info.dash.video[streamIndex]]
-        } else if let maxQuality = maxQuality {
-            // 用户选择了画质，保留该画质的最高码率流
-            // （手动切画质时一般会带 streamIndex，走上面精确选流；这里是无 streamIndex 的兜底）
-            let matchingStreams = videos.filter { $0.id == maxQuality }
-            if let highestBandwidthStream = matchingStreams.max(by: { $0.bandwidth < $1.bandwidth }) {
-                videos = [highestBandwidthStream]
-            } else {
-                videos = matchingStreams
-            }
-        } else {
-            // 默认模式：自适应模式
-            // 使用设置中的画质限制
-            let qualityLimit = Settings.mediaQuality.qn
-            videos = videos.filter { $0.id <= qualityLimit }
-
-            // 保留最高画质 + 中等画质（1080P）+ 低画质（720P 及以下）作为后备
-            // 这样 AVPlayer 可以根据网络状况自动降级
-            let highestQuality = videos.map { $0.id }.max() ?? qualityLimit
-
-            // 保留最高画质的所有编码
-            let highQualityVideos = videos.filter { $0.id == highestQuality }
-
-            // 保留中等画质作为后备（1080P 及以下，但不包括最高画质）
-            let fallbackVideos = videos.filter { $0.id < highestQuality && $0.id >= 80 }
-
-            // 保留低画质作为紧急后备（720P 及以下）
-            let emergencyVideos = videos.filter { $0.id < 80 && $0.id >= 64 }
-
-            // 合并：最高画质 + 中等画质 + 低画质
-            videos = highQualityVideos + fallbackVideos + emergencyVideos
-        }
 
         // 按 bandwidth 降序排序（码率最高的优先，让 AVPlayer 优先选择）
         // 这样可以确保在同一画质等级下，AVPlayer 会选择码率最高的流
@@ -538,22 +521,52 @@ private extension BilibiliVideoResourceLoaderDelegate {
 }
 
 enum BVideoUrlUtils {
-    /// 自動模式在硬體可解碼時優先 HEVC，以較低碼率維持同等畫質；使用者開啟
-    /// 「AVC 優先」或裝置沒有 HEVC 硬體解碼時，則在同畫質有 AVC 的前提下回退 AVC。
-    static func applyingCodecPreference(to videos: [VideoPlayURLInfo.DashInfo.DashMediaInfo]) -> [VideoPlayURLInfo.DashInfo.DashMediaInfo] {
-        let preferAvc = Settings.preferAvc || !VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
-        let videosByQuality = Dictionary(grouping: videos, by: \.id)
+    static var supportsHEVCHardwareDecoding: Bool {
+        VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
+    }
 
-        return videos.filter { video in
-            guard let sameQualityVideos = videosByQuality[video.id] else { return true }
-            if preferAvc, sameQualityVideos.contains(where: \.isAvc) {
-                return video.isAvc
-            }
-            if !preferAvc, sameQualityVideos.contains(where: \.isHevc) {
-                return video.isHevc
-            }
-            return true
+    /// 支援 HEVC 的裝置只交付 HEVC 流，避免 AVPlayer 自動切回 AVC。若 API 完全沒有
+    /// HEVC 流才保留原始清單，以免舊影片無法播放；不支援 HEVC 的裝置則優先 AVC。
+    static func applyingCodecPreference(to videos: [VideoPlayURLInfo.DashInfo.DashMediaInfo]) -> [VideoPlayURLInfo.DashInfo.DashMediaInfo] {
+        if supportsHEVCHardwareDecoding {
+            let hevcVideos = videos.filter(\.isHevc)
+            return hevcVideos.isEmpty ? videos : hevcVideos
         }
+
+        let avcVideos = videos.filter(\.isAvc)
+        return avcVideos.isEmpty ? videos : avcVideos
+    }
+
+    /// 套用播放器畫質模式。偏好模式會直接鎖定「不高於偏好值」的最高可用畫質；
+    /// 自動模式才保留全部畫質，讓 AVPlayer 做自適應切換。
+    static func selectingVideos(from videos: [VideoPlayURLInfo.DashInfo.DashMediaInfo], selection: BVideoQualitySelection) -> [VideoPlayURLInfo.DashInfo.DashMediaInfo] {
+        let codecCompatibleVideos = applyingCodecPreference(to: videos)
+
+        switch selection {
+        case .automatic:
+            return codecCompatibleVideos
+        case let .preferred(preferredQuality):
+            return videosAtPreferredQuality(codecCompatibleVideos, preferredQuality: preferredQuality)
+        case let .stream(quality, index):
+            if videos.indices.contains(index) {
+                let selected = videos[index]
+                if codecCompatibleVideos.contains(selected) {
+                    return [selected]
+                }
+            }
+            return videosAtPreferredQuality(codecCompatibleVideos, preferredQuality: quality)
+        }
+    }
+
+    private static func videosAtPreferredQuality(_ videos: [VideoPlayURLInfo.DashInfo.DashMediaInfo], preferredQuality: Int) -> [VideoPlayURLInfo.DashInfo.DashMediaInfo] {
+        guard !videos.isEmpty else { return [] }
+        let lowerOrEqualQualities = videos.lazy.map(\.id).filter { $0 <= preferredQuality }
+        let resolvedQuality = lowerOrEqualQualities.max() ?? videos.map(\.id).min()!
+        let matchingVideos = videos.filter { $0.id == resolvedQuality }
+        guard let highestBandwidthVideo = matchingVideos.max(by: { $0.bandwidth < $1.bandwidth }) else {
+            return []
+        }
+        return [highestBandwidthVideo]
     }
 
     static func sortUrls(base: String, backup: [String]?) -> [String] {

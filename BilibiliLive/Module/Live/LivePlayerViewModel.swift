@@ -146,6 +146,15 @@ class LivePlayerViewModel {
             }
         }
 
+        // API 理論上會依 codec 參數只回傳一種編碼；再次過濾可避免服務端忽略參數時，
+        // 支援 HEVC 的裝置仍在起播或線路選單中選到 AVC。
+        if BVideoUrlUtils.supportsHEVCHardwareDecoding {
+            let hevcPlayInfos = allPlayInfos.filter { $0.isHevc }
+            if !hevcPlayInfos.isEmpty {
+                allPlayInfos = hevcPlayInfos
+            }
+        }
+
         allPlayInfos.sort { a, b in
             return a.current_qn ?? 0 > b.current_qn ?? 0
         }
@@ -190,6 +199,11 @@ struct LivePlayUrlInfo {
     let url: String
     let current_qn: Int?
     let codec_name: String?
+
+    var isHevc: Bool {
+        guard let codecName = codec_name?.lowercased() else { return false }
+        return codecName.contains("hevc") || codecName.contains("h265")
+    }
 }
 
 extension WebRequest.EndPoint {
@@ -238,7 +252,7 @@ extension WebRequest {
                                                          parameters: ["room_id": roomID,
                                                                       "protocol": "1",
                                                                       "format": "0,1,2",
-                                                                      "codec": "0,1",
+                                                                      "codec": BVideoUrlUtils.supportsHEVCHardwareDecoding ? "1" : "0",
                                                                       "qn": "10000",
                                                                       "platform": "web",
                                                                       "ptype": "8",

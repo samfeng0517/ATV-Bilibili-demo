@@ -11,8 +11,8 @@ class BVideoQualityPlugin: NSObject, CommonPlayerPlugin {
     private var availableQualities: [QualityOption] = []
     private var currentQualityId: Int?
     private var currentStreamIndex: Int? // 当前选中的流索引
-    private var isQualityLocked: Bool = false // 是否手动锁定了画质
-    private var onQualityChange: ((Int, Int?) -> Void)? // (qualityId, streamIndex)
+    private var isAutomatic = false
+    private var onQualityChange: ((BVideoQualitySelection) -> Void)?
 
     struct QualityOption {
         let id: Int
@@ -23,7 +23,7 @@ class BVideoQualityPlugin: NSObject, CommonPlayerPlugin {
         let streamIndex: Int? // 在 dash.video 数组中的索引（用于精确定位流）
     }
 
-    init(detailData: PlayerDetailData, onQualityChange: @escaping (Int, Int?) -> Void) {
+    init(detailData: PlayerDetailData, onQualityChange: @escaping (BVideoQualitySelection) -> Void) {
         playData = detailData
         self.onQualityChange = onQualityChange
         super.init()
@@ -38,10 +38,12 @@ class BVideoQualityPlugin: NSObject, CommonPlayerPlugin {
 
     private func extractAvailableQualities() {
         let supportFormats = playData.videoPlayURLInfo.support_formats
-        let videoStreams = playData.videoPlayURLInfo.dash.video
+        let allVideoStreams = playData.videoPlayURLInfo.dash.video
+        let videoStreams = BVideoUrlUtils.applyingCodecPreference(to: allVideoStreams)
 
         // 为每个视频流创建一个 QualityOption
-        availableQualities = videoStreams.enumerated().map { index, stream in
+        availableQualities = videoStreams.compactMap { stream in
+            guard let index = allVideoStreams.firstIndex(of: stream) else { return nil }
             // 尝试从 support_formats 中找到该画质的描述信息
             let format = supportFormats.first { $0.quality == stream.id }
             let baseName = format?.new_description ?? "画质 \(stream.id)"
@@ -79,14 +81,26 @@ class BVideoQualityPlugin: NSObject, CommonPlayerPlugin {
             }
         }
 
-        // 设置当前画质为实际返回的画质
-        currentQualityId = playData.videoPlayURLInfo.quality
+        let initialSelection = BVideoQualitySelection.settingsDefault
+        isAutomatic = initialSelection == .automatic
+        let initiallySelectedVideo = BVideoUrlUtils
+            .selectingVideos(from: allVideoStreams, selection: initialSelection)
+            .first
+        currentQualityId = initiallySelectedVideo?.id
+        currentStreamIndex = initiallySelectedVideo.flatMap { allVideoStreams.firstIndex(of: $0) }
     }
 
     func addMenuItems(current: inout [UIMenuElement]) -> [UIMenuElement] {
         guard !availableQualities.isEmpty else { return [] }
 
         let qualityImage = UIImage(systemName: "video.fill")
+
+        let automaticAction = UIAction(
+            title: "自動",
+            state: isAutomatic ? .on : .off
+        ) { [weak self] _ in
+            self?.switchToAutomaticQuality()
+        }
 
         // 按画质 ID 分组
         let groupedQualities = Dictionary(grouping: availableQualities, by: { $0.id })
@@ -114,7 +128,8 @@ class BVideoQualityPlugin: NSObject, CommonPlayerPlugin {
             // 为该画质下的每个流创建菜单项
             let streamActions = streams.map { quality -> UIAction in
                 // 检查是否是当前选中的流
-                let isCurrentStream = quality.streamIndex == currentStreamIndex && isQualityLocked
+                let isCurrentStream = !isAutomatic && quality.id == currentQualityId &&
+                    (currentStreamIndex == nil || quality.streamIndex == currentStreamIndex)
 
                 // 提取编码和码率信息（如 "AVC, 27.2 Mbps"）
                 let streamInfo: String
@@ -154,19 +169,29 @@ class BVideoQualityPlugin: NSObject, CommonPlayerPlugin {
             title: "画质",
             image: qualityImage,
             identifier: UIMenu.Identifier(rawValue: "quality"),
-            children: qualitySubmenus
+            children: [automaticAction] + qualitySubmenus
         )
 
         return [qualityMenu]
     }
 
     private func switchQuality(to quality: QualityOption) {
-        // 更新状态：标记为手动锁定
-        isQualityLocked = true
+        isAutomatic = false
         currentQualityId = quality.id
         currentStreamIndex = quality.streamIndex
 
         // 触发画质切换
-        onQualityChange?(quality.id, quality.streamIndex)
+        if let streamIndex = quality.streamIndex {
+            onQualityChange?(.stream(quality: quality.id, index: streamIndex))
+        } else {
+            onQualityChange?(.preferred(quality.id))
+        }
+    }
+
+    private func switchToAutomaticQuality() {
+        isAutomatic = true
+        currentQualityId = nil
+        currentStreamIndex = nil
+        onQualityChange?(.automatic)
     }
 }

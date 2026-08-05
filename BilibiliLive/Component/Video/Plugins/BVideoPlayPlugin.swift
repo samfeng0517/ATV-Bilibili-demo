@@ -14,10 +14,8 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private let playData: PlayerDetailData
     private var currentQualityId: Int?
     private var currentPlaybackTime: Double = 0
-    // 记录最近一次实际用于加载的 maxQuality/streamIndex，host 切换时原样复用，
-    // 不去动用户当前的画质模式（自动多档 fallback 还是手动锁定某一档）
-    private var lastMaxQuality: Int?
-    private var lastStreamIndex: Int?
+    // 記錄最近一次實際使用的畫質模式，切換 CDN host 時原樣復用。
+    private var currentQualitySelection = BVideoQualitySelection.settingsDefault
 
     private var networkLogTimer: Timer?
     private var lastStalls = 0
@@ -69,7 +67,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         playerVC.player = nil
         playerVC.appliesPreferredDisplayCriteriaAutomatically = Settings.contentMatch
         Task {
-            try? await playmedia(urlInfo: playData.videoPlayURLInfo, playerInfo: playData.playerInfo)
+            try? await playmedia(urlInfo: playData.videoPlayURLInfo, playerInfo: playData.playerInfo, qualitySelection: currentQualitySelection)
         }
     }
 
@@ -344,7 +342,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         }
 
         do {
-            try await playmedia(urlInfo: playData.videoPlayURLInfo, playerInfo: playData.playerInfo, maxQuality: lastMaxQuality, streamIndex: lastStreamIndex, preferredHost: host, isQualitySwitch: true)
+            try await playmedia(urlInfo: playData.videoPlayURLInfo, playerInfo: playData.playerInfo, qualitySelection: currentQualitySelection, preferredHost: host, isQualitySwitch: true)
             if let newPlayer = playerVC?.player {
                 await newPlayer.seek(to: CMTime(seconds: currentPlaybackTime, preferredTimescale: 1), toleranceBefore: .zero, toleranceAfter: .zero)
                 if shouldResume {
@@ -364,24 +362,8 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     /// 与资源加载器选主视频流的逻辑对齐，取出该流各 CDN host 的代表 URL，供起播轻量测速。
-    private func primaryCDNCandidates(from info: VideoPlayURLInfo, maxQuality: Int?, streamIndex: Int?) -> [String] {
-        var videos = BVideoUrlUtils.applyingCodecPreference(to: info.dash.video)
-        if let streamIndex, streamIndex < info.dash.video.count {
-            videos = [info.dash.video[streamIndex]]
-        } else if let maxQuality {
-            let matching = videos.filter { $0.id == maxQuality }
-            if let best = matching.max(by: { $0.bandwidth < $1.bandwidth }) {
-                videos = [best]
-            } else {
-                videos = matching
-            }
-        } else {
-            let qualityLimit = Settings.mediaQuality.qn
-            videos = videos.filter { $0.id <= qualityLimit }
-            if let highest = videos.map(\.id).max() {
-                videos = videos.filter { $0.id == highest }
-            }
-        }
+    private func primaryCDNCandidates(from info: VideoPlayURLInfo, qualitySelection: BVideoQualitySelection) -> [String] {
+        var videos = BVideoUrlUtils.selectingVideos(from: info.dash.video, selection: qualitySelection)
         videos.sort { $0.bandwidth > $1.bandwidth }
         guard let primary = videos.first else { return [] }
         var seenHosts = Set<String>()
@@ -392,7 +374,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     @MainActor
-    private func playmedia(urlInfo: VideoPlayURLInfo, playerInfo: PlayerInfo?, maxQuality: Int? = nil, streamIndex: Int? = nil, preferredHost: String? = nil, isQualitySwitch: Bool = false) async throws {
+    private func playmedia(urlInfo: VideoPlayURLInfo, playerInfo: PlayerInfo?, qualitySelection: BVideoQualitySelection, preferredHost: String? = nil, isQualitySwitch: Bool = false) async throws {
         let playURL = URL(string: BilibiliVideoResourceLoaderDelegate.URLs.play)!
         let headers: [String: String] = [
             "User-Agent": Keys.userAgent,
@@ -402,13 +384,12 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         // access log 是按 item 统计的，换流后累计值归零，这里同步重置增量基准
         lastStalls = 0
         lastDroppedFrames = 0
-        lastMaxQuality = maxQuality
-        lastStreamIndex = streamIndex
+        currentQualitySelection = qualitySelection
 
         // 起播 / 切画质时做一次轻量测速选 host；运行时已指定 preferredHost 的切换则跳过
         var resolvedHost = preferredHost ?? CDNNodeStore.fixedSelectedHost
         if resolvedHost == nil {
-            let candidates = primaryCDNCandidates(from: urlInfo, maxQuality: maxQuality, streamIndex: streamIndex)
+            let candidates = primaryCDNCandidates(from: urlInfo, qualitySelection: qualitySelection)
             if let best = await CDNDiagnostics.pickFastestHost(urls: candidates) {
                 resolvedHost = best
                 Logger.info("[cdn] 起播选用 host: \(best)")
@@ -416,7 +397,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         }
 
         playerDelegate = BilibiliVideoResourceLoaderDelegate()
-        playerDelegate?.setBilibili(info: urlInfo, subtitles: playerInfo?.subtitle?.subtitles ?? [], aid: playData.aid, maxQuality: maxQuality, streamIndex: streamIndex, preferredHost: resolvedHost)
+        playerDelegate?.setBilibili(info: urlInfo, subtitles: playerInfo?.subtitle?.subtitles ?? [], aid: playData.aid, qualitySelection: qualitySelection, preferredHost: resolvedHost)
 
         // 只在初次加载时设置 appliesPreferredDisplayCriteriaAutomatically，切换画质时跳过
         if !isQualitySwitch {
@@ -436,23 +417,24 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     @MainActor
-    func switchQuality(to qualityId: Int, streamIndex: Int?) async {
+    func switchQuality(to selection: BVideoQualitySelection) async {
         guard let player = playerVC?.player else { return }
 
         let currentTime = player.currentTime().seconds
-        guard currentTime > 0 else { return }
 
         // 保存当前播放位置
-        currentPlaybackTime = currentTime
-        currentQualityId = qualityId
+        currentPlaybackTime = currentTime.isFinite ? max(0, currentTime) : 0
+        currentQualityId = selection.qualityId
 
         // 重新加载视频，使用新的画质
         do {
-            try await playmedia(urlInfo: playData.videoPlayURLInfo, playerInfo: playData.playerInfo, maxQuality: qualityId, streamIndex: streamIndex, isQualitySwitch: true)
+            try await playmedia(urlInfo: playData.videoPlayURLInfo, playerInfo: playData.playerInfo, qualitySelection: selection, isQualitySwitch: true)
 
             // 恢复播放位置并继续播放
             if let newPlayer = playerVC?.player {
-                await newPlayer.seek(to: CMTime(seconds: currentPlaybackTime, preferredTimescale: 1), toleranceBefore: .zero, toleranceAfter: .zero)
+                if currentPlaybackTime > 0 {
+                    await newPlayer.seek(to: CMTime(seconds: currentPlaybackTime, preferredTimescale: 1), toleranceBefore: .zero, toleranceAfter: .zero)
+                }
                 newPlayer.play()
             }
         } catch {

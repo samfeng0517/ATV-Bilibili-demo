@@ -33,7 +33,7 @@ enum Settings {
     @UserDefault("Settings.direatlyEnterVideo", defaultValue: false)
     static var direatlyEnterVideo: Bool
 
-    @UserDefaultCodable("Settings.mediaQuality", defaultValue: .quality_1080p)
+    @UserDefaultCodable("Settings.mediaQuality", defaultValue: .automatic)
     static var mediaQuality: MediaQualityEnum
 
     @UserDefaultCodable("Settings.mediaPlayerSpeed", defaultValue: PlaySpeed.default)
@@ -305,6 +305,8 @@ extension DanmuArea {
 }
 
 enum MediaQualityEnum: Codable, CaseIterable {
+    case automatic
+    case quality_720p
     case quality_1080p
     case quality_2160p
     case quality_hdr_dolby
@@ -313,6 +315,10 @@ enum MediaQualityEnum: Codable, CaseIterable {
 extension MediaQualityEnum {
     var desp: String {
         switch self {
+        case .automatic:
+            return "自動"
+        case .quality_720p:
+            return "720p"
         case .quality_1080p:
             return "1080p"
         case .quality_2160p:
@@ -324,6 +330,10 @@ extension MediaQualityEnum {
 
     var qn: Int {
         switch self {
+        case .automatic:
+            return 127
+        case .quality_720p:
+            return 74
         case .quality_1080p:
             return 116
         case .quality_2160p:
@@ -335,6 +345,10 @@ extension MediaQualityEnum {
 
     var fnval: Int {
         switch self {
+        case .automatic:
+            return 976
+        case .quality_720p:
+            return 16
         case .quality_1080p:
             return 16
         case .quality_2160p:
@@ -342,5 +356,10 @@ extension MediaQualityEnum {
         case .quality_hdr_dolby:
             return 976
         }
+    }
+
+    /// nil 代表交由 AVPlayer 依網路狀況自動選擇；其餘值是起播時偏好的畫質上限。
+    var preferredQn: Int? {
+        self == .automatic ? nil : qn
     }
 }
