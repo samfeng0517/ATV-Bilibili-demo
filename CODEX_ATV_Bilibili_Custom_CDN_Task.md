@@ -44,7 +44,8 @@
 - 使用 `URLComponents` 僅替換 DASH `base_url` 的 hostname，保留 scheme、path、query、簽名參數與 fragment。
 - 候選順序為「自訂節點 URL → 原始 base URL → 原始 backup URLs」，並依序去重。
 - 固定節點模式會將指定 hostname 作為 SIDX 與起播首選。
-- 自動模式將所有有效節點交由既有 `CDNDiagnostics` 實測選速。
+- 自動模式將所有有效節點交由 `CDNDiagnostics` 實測選速；起播採小樣本並行測速，
+  總等待時間受單次請求超時約束，並短暫快取勝出節點，避免隨清單節點數量線性增加。
 - SIDX 或分段從自訂節點取得失敗時，繼續嘗試完整保留的 Bilibili 原始候選。
 - 以 `[CustomCDN]` Console log 記錄注入順序、候選順序、更新結果與實際成功 hostname，不記錄 token 或 cookie。
 

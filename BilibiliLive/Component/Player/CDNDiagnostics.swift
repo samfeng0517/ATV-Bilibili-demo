@@ -36,8 +36,34 @@ enum CDNDiagnostics {
 
     /// 菜单手动测速 / 运行时切换：较大样本，结果更稳
     private static let fullProbeBytes = 2 * 1024 * 1024
-    /// 起播择优：小样本，控制在几百毫秒级，不拖慢起播
-    private static let quickProbeBytes = 256 * 1024
+    /// 起播择优只需要快速分辨可用性与相对速度。所有候选会并行请求，因此保持小样本，
+    /// 避免节点很多时同时下载过多数据、反而让候选互相抢带宽。
+    private static let quickProbeBytes = 64 * 1024
+    /// 短时间内连续播放时沿用上次胜出的节点，避免每部影片都重新等待测速。
+    private static let quickProbeCacheLifetime: TimeInterval = 5 * 60
+
+    private actor QuickProbeCache {
+        private var host: String?
+        private var updatedAt = Date.distantPast
+
+        func cachedHost(in urls: [String], lifetime: TimeInterval) -> String? {
+            guard Date().timeIntervalSince(updatedAt) < lifetime,
+                  let host,
+                  urls.contains(where: { URLComponents(string: $0)?.host == host })
+            else {
+                host = nil
+                return nil
+            }
+            return host
+        }
+
+        func store(host: String) {
+            self.host = host
+            updatedAt = Date()
+        }
+    }
+
+    private static let quickProbeCache = QuickProbeCache()
 
     private static let session: Session = {
         let config = URLSessionConfiguration.ephemeral
@@ -49,8 +75,8 @@ enum CDNDiagnostics {
 
     private static let quickSession: Session = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 3
-        config.timeoutIntervalForResource = 4
+        config.timeoutIntervalForRequest = 2
+        config.timeoutIntervalForResource = 3
         config.headers = HTTPHeaders(["User-Agent": Keys.userAgent])
         return Session(configuration: config)
     }()
@@ -66,14 +92,25 @@ enum CDNDiagnostics {
         guard urls.count > 1 else {
             return urls.first.flatMap { URLComponents(string: $0)?.host }
         }
-        let results = await probeAll(urls: urls, bytes: quickProbeBytes, session: quickSession)
+        if let cachedHost = await quickProbeCache.cachedHost(in: urls, lifetime: quickProbeCacheLifetime) {
+            Logger.info("[cdn] 起播沿用最近测速 host: \(cachedHost)")
+            return cachedHost
+        }
+
+        // 起播测速与菜单里的完整测速目标不同：这里优先限制播放前的总等待时间。
+        // 一次并行启动所有短请求，使最坏等待接近单个请求的超时，而不是「节点数 × 超时」。
+        let results = await probeConcurrently(urls: urls, bytes: quickProbeBytes, session: quickSession)
         let ranked = results.sorted { ($0.mbps ?? -1) > ($1.mbps ?? -1) }
         let summary = ranked.map { r in
             let speed = r.mbps.map { String(format: "%.1fMbps", $0) } ?? "失败"
             return "\(r.host)=\(speed)"
         }.joined(separator: ", ")
-        Logger.info("[cdn] 起播轻量测速 (\(quickProbeBytes / 1024)KB): \(summary)")
-        return ranked.first(where: { $0.mbps != nil })?.host
+        Logger.info("[cdn] 起播并行轻量测速 (\(quickProbeBytes / 1024)KB): \(summary)")
+        let fastestHost = ranked.first(where: { $0.mbps != nil })?.host
+        if let fastestHost {
+            await quickProbeCache.store(host: fastestHost)
+        }
+        return fastestHost
     }
 
     /// 测速并把结果写进日志，返回适合直接显示的文本。
@@ -91,6 +128,23 @@ enum CDNDiagnostics {
             results.append(await probe(url: url, bytes: bytes, session: session))
         }
         return results
+    }
+
+    private static func probeConcurrently(urls: [String], bytes: Int, session: Session) async -> [ProbeResult] {
+        await withTaskGroup(of: ProbeResult.self, returning: [ProbeResult].self) { group in
+            for url in urls {
+                group.addTask {
+                    await probe(url: url, bytes: bytes, session: session)
+                }
+            }
+
+            var results = [ProbeResult]()
+            results.reserveCapacity(urls.count)
+            for await result in group {
+                results.append(result)
+            }
+            return results
+        }
     }
 
     private static func probe(url: String, bytes: Int, session: Session) async -> ProbeResult {
