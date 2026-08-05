@@ -25,6 +25,20 @@
 - 云视听投屏
 - HDR播放
 - 字幕
+- APP 內 CDN 節點管理（手動節點、指定／自動選擇、GitHub 清單更新）
+
+### CDN 節點清單
+
+APP 預設每 24 小時從 repository 根目錄的 `cdn-list.json` 更新節點，也可在「設定 → 音視訊 → CDN 節點設定」改用其他 GitHub HTTPS 網址。JSON 支援以下格式：
+
+```json
+{
+  "version": 1,
+  "nodes": [
+    { "name": "節點名稱", "host": "cdn.example.com" }
+  ]
+}
+```
 
  ![](imgs/1.jpg)
  ![](imgs/2.jpg)

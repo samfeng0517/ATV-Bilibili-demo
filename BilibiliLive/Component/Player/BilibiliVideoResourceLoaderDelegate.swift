@@ -545,8 +545,6 @@ private extension BilibiliVideoResourceLoaderDelegate {
 }
 
 enum BVideoUrlUtils {
-    static let preferredCDNHost = "cn-jxnc-cmcc-bcache-06.bilivideo.com"
-
     static func sortUrls(base: String, backup: [String]?) -> [String] {
         var urls = [base]
         if let backup {
@@ -622,19 +620,17 @@ extension VideoPlayURLInfo.DashInfo.DashMediaInfo {
 
     var playableURLs: [String] {
         let originalURLs = originalPlayableURLs
-        guard let customURL = BVideoUrlUtils.replacingHost(
-            in: base_url,
-            withHost: BVideoUrlUtils.preferredCDNHost
-        ) else {
-            return originalURLs
+        let originalHost = URLComponents(string: base_url)?.host ?? "?"
+        let customURLs = CDNNodeStore.candidateHosts.compactMap { host in
+            BVideoUrlUtils.replacingHost(in: base_url, withHost: host)
+        }
+        if !customURLs.isEmpty {
+            let injectedHosts = customURLs.compactMap { URLComponents(string: $0)?.host }
+            Logger.info("[CustomCDN] injected hosts \(injectedHosts) before original host \(originalHost)")
         }
 
-        let originalHost = URLComponents(string: base_url)?.host ?? "?"
-        let injectedHost = URLComponents(string: customURL)?.host ?? "?"
-        Logger.info("[CustomCDN] injected host \(injectedHost) before original host \(originalHost)")
-
         var seenURLs = Set<String>()
-        return ([customURL] + originalURLs).filter { seenURLs.insert($0).inserted }
+        return (customURLs + originalURLs).filter { seenURLs.insert($0).inserted }
     }
 
     var isHevc: Bool {

@@ -351,7 +351,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         lastStreamIndex = streamIndex
 
         // 起播 / 切画质时做一次轻量测速选 host；运行时已指定 preferredHost 的切换则跳过
-        var resolvedHost = preferredHost
+        var resolvedHost = preferredHost ?? CDNNodeStore.fixedSelectedHost
         if resolvedHost == nil {
             let candidates = primaryCDNCandidates(from: urlInfo, maxQuality: maxQuality, streamIndex: streamIndex)
             if let best = await CDNDiagnostics.pickFastestHost(urls: candidates) {

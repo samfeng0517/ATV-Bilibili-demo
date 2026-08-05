@@ -125,6 +125,24 @@ enum Settings {
 
     @UserDefaultCodable("Search.histories", defaultValue: [])
     static var searchHistories: [String]
+
+    @UserDefaultCodable("Settings.cdn.manualNodes", defaultValue: [])
+    static var cdnManualNodes: [CDNNode]
+
+    @UserDefaultCodable("Settings.cdn.remoteNodes", defaultValue: [])
+    static var cdnRemoteNodes: [CDNNode]
+
+    @UserDefault("Settings.cdn.selection", defaultValue: CDNSelection.automatic.rawValue)
+    static var cdnSelection: String
+
+    @UserDefault("Settings.cdn.autoUpdate", defaultValue: true)
+    static var cdnAutoUpdate: Bool
+
+    @UserDefault("Settings.cdn.listURL", defaultValue: CDNNodeStore.defaultListURL)
+    static var cdnListURL: String
+
+    @UserDefault("Settings.cdn.lastUpdate", defaultValue: Date(timeIntervalSince1970: 0))
+    static var cdnLastUpdate: Date
 }
 
 extension Settings {

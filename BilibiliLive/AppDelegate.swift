@@ -42,6 +42,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        Task {
+            await CDNListUpdater.shared.updateIfNeeded()
+        }
     }
 
     func showLogin() {

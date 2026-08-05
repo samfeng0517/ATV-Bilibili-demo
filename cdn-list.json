@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "name": "江西移動",
+      "host": "cn-jxnc-cmcc-bcache-06.bilivideo.com"
+    },
+    {
+      "name": "Bilibili COS",
+      "host": "upos-sz-mirrorcosov.bilivideo.com"
+    }
+  ]
+}

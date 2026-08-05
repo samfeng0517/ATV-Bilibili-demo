@@ -96,6 +96,11 @@ class SettingsViewController: UIViewController {
         setupData()
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        dataSource?.snapshot().itemIdentifiers.forEach { $0.updateAction?() }
+    }
+
     private func configureDataSource() {
         dataSource = UICollectionViewDiffableDataSource<SectionModel, CellModel>(collectionView: collectionView) { collectionView, indexPath, cellModel -> UICollectionViewCell? in
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: String(describing: SettingsSwitchCell.self), for: indexPath) as! SettingsSwitchCell
@@ -151,6 +156,11 @@ class SettingsViewController: UIViewController {
             }
 
             SectionModel(title: "音视频") {
+                Navigation(title: "CDN 节点设置", desp: CDNNodeStore.selectionDescription) { [weak self] in
+                    let controller = CDNSettingsViewController()
+                    controller.modalPresentationStyle = .fullScreen
+                    self?.present(controller, animated: true)
+                }
                 Actions(title: "最高画质", message: "4k以上需要大会员",
                         current: Settings.mediaQuality.desp,
                         options: MediaQualityEnum.allCases,
