@@ -6,10 +6,6 @@
       "host": "cn-jxnc-cmcc-bcache-06.bilivideo.com"
     },
     {
-      "name": "騰訊雲海外",
-      "host": "upos-sz-mirrorcosov.bilivideo.com"
-    },
-    {
       "name": "阿里雲",
       "host": "upos-sz-mirrorali.bilivideo.com"
     },
@@ -72,6 +68,10 @@
     {
       "name": "阿里雲海外",
       "host": "upos-sz-mirroraliov.bilivideo.com"
+    },
+    {
+      "name": "騰訊雲海外",
+      "host": "upos-sz-mirrorcosov.bilivideo.com"
     },
     {
       "name": "華為雲海外",

@@ -1,0 +1,41 @@
+name: Sync CDN list
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+      timezone: "Asia/Taipei"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-cdn-list
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Generate CDN list
+        run: bash scripts/sync-cdn-list.sh
+
+      - name: Commit updated CDN list
+        run: |
+          if git diff --quiet -- cdn-list.json; then
+            echo "CDN list is already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- cdn-list.json
+          git commit -m "chore: sync CDN list from upstream"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
