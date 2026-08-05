@@ -203,13 +203,6 @@ class SettingsViewController: UIViewController {
                     self?.updateCDNList()
                 }
 
-                for node in Settings.cdnRemoteNodes {
-                    CustomAction(id: "cdn.remote.\(node.id)", title: "GitHub 節點：\(node.name)", desp: node.host) { [weak self] in
-                        Settings.cdnSelection = node.id
-                        self?.setupData()
-                    }
-                }
-
                 if !Settings.cdnRemoteNodes.isEmpty {
                     CustomAction(id: "cdn.github.clear", title: "清除已下載 CDN 清單", desp: "共 \(Settings.cdnRemoteNodes.count) 個節點") { [weak self] in
                         self?.confirmClearRemoteCDNNodes()
