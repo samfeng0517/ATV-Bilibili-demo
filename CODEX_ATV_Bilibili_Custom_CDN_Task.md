@@ -4,7 +4,7 @@
 
 在不破壞 Bilibili 原始播放 URL 與 fallback 機制的前提下，提供可由 Apple TV APP 管理的 CDN 節點功能：
 
-- APP 內 CDN 設定頁。
+- APP 既有「音視訊」區塊內的 CDN 設定。
 - 支援多個手動節點。
 - 可選擇自動、指定節點或僅使用 Bilibili 原始節點。
 - 定期自動更新遠端節點清單。
@@ -22,7 +22,7 @@
 
 ### APP 設定頁
 
-- 入口位於「設定 → 音視訊 → CDN 節點設定」。
+- 所有 CDN 選項直接展開在「設定 → 音視訊」區塊，不另開獨立頁面。
 - 可新增、編輯及刪除多個手動節點。
 - 節點選單包含：
   - 自動選擇：由既有 CDN 測速流程擇優。
@@ -51,7 +51,6 @@
 ## 主要檔案
 
 - `BilibiliLive/Component/CDNNodeStore.swift`
-- `BilibiliLive/Module/Personal/CDNSettingsViewController.swift`
 - `BilibiliLive/Component/Settings.swift`
 - `BilibiliLive/Module/Personal/SettingsViewController.swift`
 - `BilibiliLive/Component/Player/BilibiliVideoResourceLoaderDelegate.swift`

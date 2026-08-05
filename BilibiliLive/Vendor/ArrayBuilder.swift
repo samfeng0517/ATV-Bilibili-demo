@@ -27,6 +27,10 @@ public enum ArrayBuilder<Element> {
         children ?? []
     }
 
+    public static func buildArray(_ components: [Component]) -> Component {
+        components.flatMap({ $0 })
+    }
+
     public static func buildBlock(_ component: Component) -> Component {
         component
     }

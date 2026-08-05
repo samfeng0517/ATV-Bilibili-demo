@@ -29,7 +29,7 @@
 
 ### CDN 節點清單
 
-APP 預設每 24 小時從 repository 根目錄的 `cdn-list.json` 更新節點，也可在「設定 → 音視訊 → CDN 節點設定」改用其他 GitHub HTTPS 網址。JSON 支援以下格式：
+APP 預設每 24 小時從 repository 根目錄的 `cdn-list.json` 更新節點，也可直接在「設定 → 音視訊」區塊改用其他 GitHub HTTPS 網址。JSON 支援以下格式：
 
 ```json
 {

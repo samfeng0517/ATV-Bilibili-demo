@@ -28,6 +28,7 @@ class SettingsViewController: UIViewController {
     }
 
     class CellModel: Hashable, Equatable {
+        let id: String
         let title: String
         let desp: () -> String
         let action: ((@escaping () -> Void) -> Void)?
@@ -35,14 +36,15 @@ class SettingsViewController: UIViewController {
         var updateAction: (() -> Void)?
 
         func hash(into hasher: inout Hasher) {
-            hasher.combine(title)
+            hasher.combine(id)
         }
 
         static func == (lhs: CellModel, rhs: CellModel) -> Bool {
-            lhs.title == rhs.title
+            lhs.id == rhs.id
         }
 
-        init(title: String, desp: @autoclosure @escaping () -> String, action: ((@escaping () -> Void) -> Void)?) {
+        init(id: String? = nil, title: String, desp: @autoclosure @escaping () -> String, action: ((@escaping () -> Void) -> Void)?) {
+            self.id = id ?? title
             self.title = title
             self.desp = desp
             self.action = action
@@ -78,6 +80,7 @@ class SettingsViewController: UIViewController {
     }()
 
     var dataSource: UICollectionViewDiffableDataSource<SectionModel, CellModel>!
+    private var isUpdatingCDNList = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -94,6 +97,16 @@ class SettingsViewController: UIViewController {
 
         configureDataSource()
         setupData()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(cdnListDidUpdate),
+            name: CDNListUpdater.didUpdateNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -156,10 +169,51 @@ class SettingsViewController: UIViewController {
             }
 
             SectionModel(title: "音视频") {
-                Navigation(title: "CDN 节点设置", desp: CDNNodeStore.selectionDescription) { [weak self] in
-                    let controller = CDNSettingsViewController()
-                    controller.modalPresentationStyle = .fullScreen
-                    self?.present(controller, animated: true)
+                Actions(title: "使用 CDN 節點", message: "自動模式會讓播放前的既有測速流程從所有節點中擇優。",
+                        current: CDNNodeStore.selectionDescription,
+                        options: [CDNSelection.automatic.rawValue, CDNSelection.original.rawValue] + CDNNodeStore.allNodes.map(\.id),
+                        optionString: ["自動選擇", "僅使用 Bilibili 原始節點"] + CDNNodeStore.allNodes.map(\.name))
+                { [weak self] selection in
+                    Settings.cdnSelection = selection
+                    self?.setupData()
+                }
+
+                CustomAction(id: "cdn.manual.add", title: "新增手動 CDN 節點", desp: "輸入名稱與 hostname") { [weak self] in
+                    self?.showManualCDNNodeEditor(node: nil)
+                }
+
+                for node in Settings.cdnManualNodes {
+                    CustomAction(id: "cdn.manual.\(node.id)", title: "手動節點：\(node.name)", desp: node.host) { [weak self] in
+                        self?.showManualCDNNodeActions(node)
+                    }
+                }
+
+                Toggle(title: "CDN 清單自動更新", setting: Settings.cdnAutoUpdate, onChange: Settings.cdnAutoUpdate.toggle()) { [weak self] enabled in
+                    self?.setupData()
+                    if enabled {
+                        self?.updateCDNList()
+                    }
+                }
+
+                CustomAction(id: "cdn.github.url", title: "CDN 清單網址", desp: Settings.cdnListURL) { [weak self] in
+                    self?.showCDNListURLEditor()
+                }
+
+                CustomAction(id: "cdn.github.update", title: isUpdatingCDNList ? "正在更新 CDN 清單…" : "立即更新 CDN 清單", desp: self.cdnUpdateDescription) { [weak self] in
+                    self?.updateCDNList()
+                }
+
+                for node in Settings.cdnRemoteNodes {
+                    CustomAction(id: "cdn.remote.\(node.id)", title: "GitHub 節點：\(node.name)", desp: node.host) { [weak self] in
+                        Settings.cdnSelection = node.id
+                        self?.setupData()
+                    }
+                }
+
+                if !Settings.cdnRemoteNodes.isEmpty {
+                    CustomAction(id: "cdn.github.clear", title: "清除已下載 CDN 清單", desp: "共 \(Settings.cdnRemoteNodes.count) 個節點") { [weak self] in
+                        self?.confirmClearRemoteCDNNodes()
+                    }
                 }
                 Actions(title: "最高画质", message: "4k以上需要大会员",
                         current: Settings.mediaQuality.desp,
@@ -259,6 +313,17 @@ class SettingsViewController: UIViewController {
 }
 
 extension SettingsViewController {
+    func CustomAction(id: String,
+                      title: String,
+                      desp: @autoclosure @escaping () -> String,
+                      onSelect: @escaping () -> Void) -> CellModel
+    {
+        CellModel(id: id, title: title, desp: desp()) { update in
+            onSelect()
+            update()
+        }
+    }
+
     func Toggle(title: String, setting: @autoclosure @escaping () -> Bool,
                 onChange: @autoclosure @escaping () -> Void,
                 extraAction: ((Bool) -> Void)? = nil) -> CellModel
@@ -333,6 +398,141 @@ extension SettingsViewController {
     }
 }
 
+private extension SettingsViewController {
+    var cdnUpdateDescription: String {
+        if isUpdatingCDNList {
+            return "正在從 GitHub 下載"
+        }
+        guard Settings.cdnLastUpdate.timeIntervalSince1970 > 0 else {
+            return "尚未更新"
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hant_TW")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "上次更新：\(formatter.string(from: Settings.cdnLastUpdate))，\(Settings.cdnRemoteNodes.count) 個節點"
+    }
+
+    func showManualCDNNodeActions(_ node: CDNNode) {
+        let alert = UIAlertController(title: node.name, message: node.host, preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "使用這個節點", style: .default) { [weak self] _ in
+            Settings.cdnSelection = node.id
+            self?.setupData()
+        })
+        alert.addAction(UIAlertAction(title: "編輯", style: .default) { [weak self] _ in
+            self?.showManualCDNNodeEditor(node: node)
+        })
+        alert.addAction(UIAlertAction(title: "刪除", style: .destructive) { [weak self] _ in
+            CDNNodeStore.removeManualNode(id: node.id)
+            self?.setupData()
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    func showManualCDNNodeEditor(node: CDNNode?) {
+        let alert = UIAlertController(
+            title: node == nil ? "新增手動節點" : "編輯手動節點",
+            message: "hostname 範例：cn-example.bilivideo.com",
+            preferredStyle: .alert
+        )
+        alert.addTextField { textField in
+            textField.text = node?.name
+            textField.placeholder = "節點名稱（可留空）"
+        }
+        alert.addTextField { textField in
+            textField.text = node?.host
+            textField.placeholder = "CDN hostname"
+            textField.keyboardType = .URL
+            textField.autocapitalizationType = .none
+        }
+        alert.addAction(UIAlertAction(title: "儲存", style: .default) { [weak self, weak alert] _ in
+            let name = alert?.textFields?.first?.text ?? ""
+            let host = alert?.textFields?.dropFirst().first?.text ?? ""
+            do {
+                if let node {
+                    try CDNNodeStore.updateManualNode(id: node.id, name: name, host: host)
+                } else {
+                    try CDNNodeStore.addManualNode(name: name, host: host)
+                }
+                self?.setupData()
+            } catch {
+                self?.showCDNResult(title: "無法儲存", message: error.localizedDescription)
+            }
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    func showCDNListURLEditor() {
+        let alert = UIAlertController(
+            title: "GitHub CDN 清單網址",
+            message: "支援 github.com 或 raw.githubusercontent.com 的 HTTPS JSON 網址。",
+            preferredStyle: .alert
+        )
+        alert.addTextField { textField in
+            textField.text = Settings.cdnListURL
+            textField.keyboardType = .URL
+            textField.autocapitalizationType = .none
+        }
+        alert.addAction(UIAlertAction(title: "儲存", style: .default) { [weak self, weak alert] _ in
+            guard let value = alert?.textFields?.first?.text else { return }
+            Settings.cdnListURL = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            Settings.cdnLastUpdate = Date(timeIntervalSince1970: 0)
+            self?.setupData()
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    func updateCDNList() {
+        guard !isUpdatingCDNList else { return }
+        isUpdatingCDNList = true
+        setupData()
+        Task { [weak self] in
+            do {
+                let count = try await CDNListUpdater.shared.updateNow()
+                await MainActor.run {
+                    self?.isUpdatingCDNList = false
+                    self?.setupData()
+                    self?.showCDNResult(title: "更新完成", message: "已從 GitHub 下載 \(count) 個 CDN 節點。")
+                }
+            } catch {
+                await MainActor.run {
+                    self?.isUpdatingCDNList = false
+                    self?.setupData()
+                    self?.showCDNResult(title: "更新失敗", message: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func confirmClearRemoteCDNNodes() {
+        let alert = UIAlertController(title: "清除已下載清單？", message: nil, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "清除", style: .destructive) { [weak self] _ in
+            let remoteIDs = Set(Settings.cdnRemoteNodes.map(\.id))
+            Settings.cdnRemoteNodes = []
+            Settings.cdnLastUpdate = Date(timeIntervalSince1970: 0)
+            if remoteIDs.contains(Settings.cdnSelection) {
+                Settings.cdnSelection = CDNSelection.automatic.rawValue
+            }
+            self?.setupData()
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    func showCDNResult(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "好", style: .cancel))
+        present(alert, animated: true)
+    }
+
+    @objc func cdnListDidUpdate() {
+        setupData()
+    }
+}
+
 extension SettingsViewController: UICollectionViewDelegate {
     private func createSnapshot(@ArrayBuilder<SectionModel> builder: () -> [SectionModel]) {
         var snapshot = NSDiffableDataSourceSnapshot<SectionModel, CellModel>()
@@ -340,7 +540,9 @@ extension SettingsViewController: UICollectionViewDelegate {
             snapshot.appendSections([section])
             snapshot.appendItems(section.items, toSection: section)
         }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
+            self?.collectionView.reloadData()
+        }
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
