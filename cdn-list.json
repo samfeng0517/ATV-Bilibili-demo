@@ -2,83 +2,83 @@
   "version": 1,
   "nodes": [
     {
-      "name": "江西移動",
+      "name": "推薦 TW/SG 最快",
       "host": "cn-jxnc-cmcc-bcache-06.bilivideo.com"
     },
     {
-      "name": "Bilibili COS",
+      "name": "騰訊雲海外",
       "host": "upos-sz-mirrorcosov.bilivideo.com"
     },
     {
-      "name": "ali",
+      "name": "阿里雲",
       "host": "upos-sz-mirrorali.bilivideo.com"
     },
     {
-      "name": "alib",
+      "name": "阿里雲",
       "host": "upos-sz-mirroralib.bilivideo.com"
     },
     {
-      "name": "alio1",
+      "name": "阿里雲",
       "host": "upos-sz-mirroralio1.bilivideo.com"
     },
     {
-      "name": "cos",
+      "name": "騰訊雲",
       "host": "upos-sz-mirrorcos.bilivideo.com"
     },
     {
-      "name": "cosb",
+      "name": "騰訊雲 VOD加速",
       "host": "upos-sz-mirrorcosb.bilivideo.com"
     },
     {
-      "name": "coso1",
+      "name": "騰訊雲",
       "host": "upos-sz-mirrorcoso1.bilivideo.com"
     },
     {
-      "name": "hw",
+      "name": "華為雲 融合CDN",
       "host": "upos-sz-mirrorhw.bilivideo.com"
     },
     {
-      "name": "hwb",
+      "name": "華為雲 融合CDN",
       "host": "upos-sz-mirrorhwb.bilivideo.com"
     },
     {
-      "name": "hwo1",
+      "name": "華為雲 融合CDN",
       "host": "upos-sz-mirrorhwo1.bilivideo.com"
     },
     {
-      "name": "08c",
+      "name": "華為雲 融合CDN",
       "host": "upos-sz-mirror08c.bilivideo.com"
     },
     {
-      "name": "08h",
+      "name": "華為雲 融合CDN",
       "host": "upos-sz-mirror08h.bilivideo.com"
     },
     {
-      "name": "08ct",
+      "name": "華為雲 融合CDN",
       "host": "upos-sz-mirror08ct.bilivideo.com"
     },
     {
-      "name": "tf_hw",
+      "name": "華為雲",
       "host": "upos-tf-all-hw.bilivideo.com"
     },
     {
-      "name": "tf_tx",
+      "name": "騰訊雲",
       "host": "upos-tf-all-tx.bilivideo.com"
     },
     {
-      "name": "akamai",
+      "name": "Akamai海外",
       "host": "upos-hz-mirrorakam.akamaized.net"
     },
     {
-      "name": "aliov",
+      "name": "阿里雲海外",
       "host": "upos-sz-mirroraliov.bilivideo.com"
     },
     {
-      "name": "hwov",
+      "name": "華為雲海外",
       "host": "upos-sz-mirrorhwov.bilivideo.com"
     },
     {
-      "name": "hk_bcache",
+      "name": "Bilibili海外",
       "host": "cn-hk-eq-bcache-01.bilivideo.com"
     }
   ]
