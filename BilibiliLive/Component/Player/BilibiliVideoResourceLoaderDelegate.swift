@@ -165,6 +165,9 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
                 return BVideoUrlUtils.isPCDN(url) ? "  PCDN \(host)" : "  \(host)"
             }
             .joined(separator: "\n")
+        let hostOrder = cdnCandidates.compactMap { URLComponents(string: $0)?.host }
+            .joined(separator: " -> ")
+        Logger.info("[CustomCDN] candidate host order for qn \(video.id): \(hostOrder)")
         Logger.info("cdn candidates for qn \(video.id) (\(video.bandwidth / 1000)kbps):\n\(detail)")
     }
 
@@ -178,7 +181,9 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
               var offset = Int(offsetStr),
               let sidxResult = sidxResult
         else {
-            currentSegmentHost = URLComponents(string: info.url)?.host
+            let fallbackHost = URLComponents(string: info.url)?.host ?? "?"
+            currentSegmentHost = fallbackHost
+            Logger.warn("[CustomCDN] SIDX unavailable; full-file fallback host: \(fallbackHost)")
             return """
             #EXTM3U
             #EXT-X-VERSION:7
@@ -197,6 +202,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
         let segment = sidxResult.sidx
         let segmentURL = sidxResult.url
         currentSegmentHost = URLComponents(string: segmentURL)?.host
+        Logger.info("[CustomCDN] segment host selected: \(currentSegmentHost ?? "?")")
         var playList = """
         #EXTM3U
         #EXT-X-VERSION:7
@@ -385,23 +391,23 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
 
         if Settings.losslessAudio {
             if let audios = info.dash.dolby?.audio {
-                // 只添加第一个杜比音频流的第一个 URL
+                // 整檔回退保留原始 URL；SIDX 仍會優先嘗試自訂 CDN
                 if let firstAudio = audios.first,
-                   let firstUrl = BVideoUrlUtils.sortUrls(base: firstAudio.base_url, backup: firstAudio.backup_url).first
+                   let firstUrl = firstAudio.originalPlayableURLs.first
                 {
                     addAudioPlayBackInfo(info: firstAudio, url: firstUrl, duration: info.dash.duration)
                 }
             } else if let audio = info.dash.flac?.audio,
-                      let firstUrl = audio.playableURLs.first
+                      let firstUrl = audio.originalPlayableURLs.first
             {
-                // 只添加第一个 FLAC 音频 URL
+                // 只添加第一個 FLAC 原始音訊 URL
                 addAudioPlayBackInfo(info: audio, url: firstUrl, duration: info.dash.duration)
             }
         }
 
-        // 只添加第一个普通音频流的第一个 URL
+        // 只添加第一個普通音訊流，整檔回退保留原始 URL
         if let firstAudio = info.dash.audio?.first,
-           let firstUrl = firstAudio.playableURLs.first
+           let firstUrl = firstAudio.originalPlayableURLs.first
         {
             addAudioPlayBackInfo(info: firstAudio, url: firstUrl, duration: info.dash.duration)
         }
@@ -539,6 +545,8 @@ private extension BilibiliVideoResourceLoaderDelegate {
 }
 
 enum BVideoUrlUtils {
+    static let preferredCDNHost = "cn-jxnc-cmcc-bcache-06.bilivideo.com"
+
     static func sortUrls(base: String, backup: [String]?) -> [String] {
         var urls = [base]
         if let backup {
@@ -548,6 +556,24 @@ enum BVideoUrlUtils {
         return urls.enumerated()
             .sorted { (tier($0.element), $0.offset) < (tier($1.element), $1.offset) }
             .map(\.element)
+    }
+
+    /// 只替換 HTTP(S) URL 的主機名稱，並保留原始路徑、查詢與片段。
+    /// targetPort 為 nil 時移除原 URL 的 port，避免將 PCDN 專用 port 帶到一般 CDN。
+    static func replacingHost(in urlString: String, withHost targetHost: String, targetPort: Int? = nil) -> String? {
+        guard let originalURL = URL(string: urlString),
+              originalURL.host != nil,
+              var components = URLComponents(string: urlString),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              !targetHost.isEmpty
+        else {
+            return nil
+        }
+
+        components.host = targetHost
+        components.port = targetPort
+        return components.string
     }
 
     // PCDN 特征：带端口，或已知的 P2P CDN 域名（部分 PCDN 域名不带端口，仅靠端口判断会漏）
@@ -590,8 +616,25 @@ enum BVideoUrlUtils {
 }
 
 extension VideoPlayURLInfo.DashInfo.DashMediaInfo {
-    var playableURLs: [String] {
+    var originalPlayableURLs: [String] {
         BVideoUrlUtils.sortUrls(base: base_url, backup: backup_url)
+    }
+
+    var playableURLs: [String] {
+        let originalURLs = originalPlayableURLs
+        guard let customURL = BVideoUrlUtils.replacingHost(
+            in: base_url,
+            withHost: BVideoUrlUtils.preferredCDNHost
+        ) else {
+            return originalURLs
+        }
+
+        let originalHost = URLComponents(string: base_url)?.host ?? "?"
+        let injectedHost = URLComponents(string: customURL)?.host ?? "?"
+        Logger.info("[CustomCDN] injected host \(injectedHost) before original host \(originalHost)")
+
+        var seenURLs = Set<String>()
+        return ([customURL] + originalURLs).filter { seenURLs.insert($0).inserted }
     }
 
     var isHevc: Bool {
@@ -659,7 +702,12 @@ actor SidxDownloader {
         {
             urls.insert(urls.remove(at: idx), at: 0)
         }
-        for url in urls.prefix(3) {
+        let hostOrder = urls.compactMap { URLComponents(string: $0)?.host }
+            .joined(separator: " -> ")
+        Logger.info("[CustomCDN] SIDX candidate host order for media \(info.id): \(hostOrder)")
+        // 自訂 CDN 會多佔一個候選，因此不能再限制前三個，
+        // 否則原本可用的較後順位 backup URL 會永遠無法被嘗試。
+        for url in urls {
             let host = URLComponents(string: url)?.host ?? url
             let start = Date()
             if let res = try? await Self.session.request(url,
@@ -670,6 +718,7 @@ actor SidxDownloader {
                 !segment.segments.isEmpty
             {
                 Logger.info("sidx ok in \(elapsedMs(since: start))ms from \(host)")
+                Logger.info("[CustomCDN] SIDX successful host: \(host)")
                 return SidxResult(sidx: segment, url: url)
             }
             Logger.warn("sidx download failed in \(elapsedMs(since: start))ms on \(host), try next url")
