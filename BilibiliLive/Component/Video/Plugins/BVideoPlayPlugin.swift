@@ -24,9 +24,10 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private var lastDroppedFrames = 0
     private var cdnProbeReport = ""
     private var isProbingCDN = false
+    private var lastKnownPlaybackRate = max(1, Double(Settings.mediaPlayerSpeed.value))
 
-    // 运行时 CDN 健康检测：只在真实卡顿时换 host，不用 observed/indicated 比特率比
-    // （indicated 常是峰值 BANDWIDTH，播放流畅时 observed 低于它完全正常）
+    // 运行时 CDN 健康检测：根据真实卡顿或 AVPlayer 的 keep-up 缓冲风险换 host，
+    // 不单独用 observed/indicated 比特率比（indicated 常是峰值，低一些仍可能流畅）。
     private var stallUnhealthyStreak = 0
     private var isEvaluatingHostSwitch = false
     private var lastHostSwitchAt: Date?
@@ -35,6 +36,12 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     /// 换完 host 后的冷静期，避免连续误触发
     private let hostSwitchCooldown: TimeInterval = 30
     private let networkLogInterval: TimeInterval = 5
+    /// preferredForwardBufferDuration 是媒体时间；倍速播放时必须按速率放大，
+    /// 才能维持相同的实际可播放秒数。上限 30 秒，避免恢复到 60 秒造成 seek 请求风暴。
+    private let baseForwardBufferDuration: TimeInterval = 15
+    private let maximumForwardBufferDuration: TimeInterval = 30
+    /// CDN 实测吞吐至少要高于「平均码率 × 播放速度」一些，才能吸收分片峰值与网络抖动。
+    private let throughputHeadroom = 1.25
 
     init(detailData: PlayerDetailData) {
         playData = detailData
@@ -72,7 +79,8 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         }
     }
 
-    func playerDidStart(player _: AVPlayer) {
+    func playerDidStart(player: AVPlayer) {
+        updateForwardBuffer(for: player)
         startNetworkLogging()
     }
 
@@ -146,12 +154,18 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         let waiting = player.reasonForWaitingToPlay?.rawValue ?? "-"
         let keepUp = item.isPlaybackLikelyToKeepUp
         let buffered = bufferedSeconds(of: item)
+        let playbackRate = effectivePlaybackRate(for: player)
+        let requiredMbps = requiredThroughputMbps(playbackRate: playbackRate)
         let stallDelta = stalls - lastStalls
-        Logger.info("playback host \(host) observed \(observed)Mbps indicated \(indicated)Mbps effective \(effective)Mbps stalls \(stalls)(+\(stallDelta)) dropped \(dropped)(+\(dropped - lastDroppedFrames)) serverChanges \(event.numberOfServerAddressChanges) tcs \(tcs.rawValue) wait \(waiting) keepUp \(keepUp) buffered \(String(format: "%.1f", buffered))s")
+        Logger.info("playback host \(host) rate \(String(format: "%.2f", playbackRate))x required \(String(format: "%.1f", requiredMbps))Mbps observed \(observed)Mbps indicated \(indicated)Mbps effective \(effective)Mbps stalls \(stalls)(+\(stallDelta)) dropped \(dropped)(+\(dropped - lastDroppedFrames)) serverChanges \(event.numberOfServerAddressChanges) tcs \(tcs.rawValue) wait \(waiting) keepUp \(keepUp) buffered \(String(format: "%.1f", buffered))s")
         lastStalls = stalls
         lastDroppedFrames = dropped
 
-        checkStallHealth(stallDelta: stallDelta, buffered: buffered, currentHost: host)
+        checkStallHealth(stallDelta: stallDelta,
+                         buffered: buffered,
+                         isLikelyToKeepUp: keepUp,
+                         playbackRate: playbackRate,
+                         currentHost: host)
     }
 
     /// 用户明确暂停（.paused）。卡缓冲/断网时是 .waitingToPlayAtSpecifiedRate，仍应做健康检测。
@@ -170,17 +184,60 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         return Double(declared)
     }
 
-    private func bufferedSeconds(of item: AVPlayerItem) -> Double {
-        guard let range = item.loadedTimeRanges.first?.timeRangeValue else { return 0 }
-        let end = range.start.seconds + range.duration.seconds
-        let current = item.currentTime().seconds
-        guard end.isFinite, current.isFinite else { return 0 }
-        return max(0, end - current)
+    /// AVPlayer.rate 是目前選擇的播放速度；等待緩衝時沿用最後的非零速率，
+    /// 避免將倍速吞吐需求誤算成 0 或退回預設值。
+    private func effectivePlaybackRate(for player: AVPlayer) -> Double {
+        if player.rate > 0 {
+            lastKnownPlaybackRate = Double(player.rate)
+        }
+        return lastKnownPlaybackRate
     }
 
-    /// 只根据真实卡顿触发换源：正在 waiting，或本周期新增了 stall。
-    /// 播放流畅时仅 observed < indicated 不触发——indicated 常是峰值，低一些完全正常。
-    private func checkStallHealth(stallDelta: Int, buffered: Double, currentHost: String) {
+    private func requiredThroughputMbps(playbackRate: Double) -> Double {
+        let averageBitrate = Double(playerDelegate?.primaryVideoBandwidth ?? 0)
+        return averageBitrate * playbackRate * throughputHeadroom / 1_000_000
+    }
+
+    private func forwardBufferDuration(playbackRate: Double) -> TimeInterval {
+        min(maximumForwardBufferDuration,
+            baseForwardBufferDuration * max(1, playbackRate))
+    }
+
+    private func updateForwardBuffer(for player: AVPlayer) {
+        guard let item = player.currentItem else { return }
+        let playbackRate = effectivePlaybackRate(for: player)
+        let duration = forwardBufferDuration(playbackRate: playbackRate)
+        guard item.preferredForwardBufferDuration != duration else { return }
+        item.preferredForwardBufferDuration = duration
+        Logger.info("[buffer] rate \(String(format: "%.2f", playbackRate))x, forward buffer \(String(format: "%.0f", duration))s media time")
+    }
+
+    private func bufferedSeconds(of item: AVPlayerItem) -> Double {
+        let current = item.currentTime().seconds
+        guard current.isFinite else { return 0 }
+
+        // seek 后 loadedTimeRanges 可能同时保留旧位置与新位置，不能假设第一个 range
+        // 就是当前播放区间。
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = range.start.seconds
+            let end = start + range.duration.seconds
+            guard start.isFinite, end.isFinite else { continue }
+            if current >= start, current <= end {
+                return max(0, end - current)
+            }
+        }
+        return 0
+    }
+
+    /// 根据真实卡顿或即将耗尽的缓冲触发换源；播放流畅时仅 observed < indicated
+    /// 不触发——indicated 常是峰值，低一些完全正常。
+    private func checkStallHealth(stallDelta: Int,
+                                  buffered: Double,
+                                  isLikelyToKeepUp: Bool,
+                                  playbackRate: Double,
+                                  currentHost: String)
+    {
         guard !isUserPaused, !isEvaluatingHostSwitch else {
             stallUnhealthyStreak = 0
             return
@@ -189,18 +246,25 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             return
         }
 
-        let unhealthy = isWaitingToPlay || stallDelta > 0
+        // loadedTimeRanges 以媒体秒计。倍速越高，同样的媒体缓冲可支撑的墙钟时间越短；
+        // likelyToKeepUp 已转差且缓冲不足时提前处理，不必等到真正停住才开始测速。
+        let lowBufferThreshold = 10 * playbackRate
+        let isRunningOutOfBuffer = !isLikelyToKeepUp && buffered < lowBufferThreshold
+        let unhealthy = isWaitingToPlay || stallDelta > 0 || isRunningOutOfBuffer
         if unhealthy {
             stallUnhealthyStreak += 1
         } else {
             stallUnhealthyStreak = 0
             return
         }
-        guard stallUnhealthyStreak >= stallTriggerCount else { return }
+        // access log 已確認新增 stall 時立即處理；waiting／keep-up 短暫抖動則仍需連續兩次，
+        // 避免使用者 seek 或剛起播時誤切 CDN。
+        let requiredStreak = stallDelta > 0 ? 1 : stallTriggerCount
+        guard stallUnhealthyStreak >= requiredStreak else { return }
         stallUnhealthyStreak = 0
 
-        let requiredMbps = Double(playerDelegate?.primaryVideoBandwidth ?? 0) / 1_000_000
-        Logger.info("[cdn] 检测到卡顿 (waiting=\(isWaitingToPlay), stallDelta=\(stallDelta), buffered \(String(format: "%.1f", buffered))s)，重新测速")
+        let requiredMbps = requiredThroughputMbps(playbackRate: playbackRate)
+        Logger.info("[cdn] 检测到缓冲风险 (rate=\(String(format: "%.2f", playbackRate))x, required=\(String(format: "%.1f", requiredMbps))Mbps, waiting=\(isWaitingToPlay), keepUp=\(isLikelyToKeepUp), stallDelta=\(stallDelta), buffered \(String(format: "%.1f", buffered))s)，重新测速")
         Task { @MainActor [weak self] in
             await self?.evaluateHostSwitch(currentHost: currentHost, requiredMbps: requiredMbps)
         }
@@ -234,14 +298,13 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             Logger.info("[cdn] 没有其他可用候选，保持 \(currentHost)")
             return
         }
-        if requiredMbps > 0, targetMbps < requiredMbps * 0.5 {
-            Logger.info("[cdn] 备选 \(target.host) (\(String(format: "%.1f", targetMbps))Mbps) 远低于流码率，放弃切换")
-            return
-        }
-
         let currentMbps = ranked.first(where: { $0.host == currentHost })?.mbps
         let reason: String
-        if let currentMbps, targetMbps > currentMbps * 1.3 {
+        if requiredMbps > 0, targetMbps >= requiredMbps,
+           currentMbps.map({ $0 < requiredMbps }) ?? true
+        {
+            reason = "满足倍速吞吐需求"
+        } else if let currentMbps, targetMbps > currentMbps * 1.3 {
             reason = "测速明显更快"
         } else if let currentMbps, targetMbps >= currentMbps * 0.7 {
             // 短测速乐观且接近时，当前节点已真实卡顿，强制换一个试试
@@ -254,7 +317,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         }
 
         lastHostSwitchAt = Date()
-        Logger.info("[cdn] 切换 host: \(currentHost) -> \(target.host) (实测\(String(format: "%.1f", targetMbps))Mbps, \(reason))")
+        Logger.info("[cdn] 切换 host: \(currentHost) -> \(target.host) (实测\(String(format: "%.1f", targetMbps))Mbps, 需求\(String(format: "%.1f", requiredMbps))Mbps, \(reason))")
         await switchHost(to: target.host)
     }
 
@@ -413,13 +476,14 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         // 0 表示无限制，让 AVPlayer 根据网络条件自动选择最高可用码率
         playerItem.preferredPeakBitRate = 0
 
-        // 之前设成 60s 是为了扛 CDN 吞吐抖动，但 BANDWIDTH 声明错误的根因已修复，
-        // 实测 CDN 吞吐充裕，不再需要这么激进的预缓冲。60s 在连续快进时的副作用是：
-        // 每次 seek 都会立刻为新位置起一大批 60s 的 range 请求，下一个 seek 一来又整体取消重来，
-        // 密集 seek 下网络连接层疲于开连接/取消，表现为长时间无响应。降到 15s 大幅减少这种抖动。
-        playerItem.preferredForwardBufferDuration = 15
+        // 倍速会更快消耗媒体时间缓冲。依当前设置在 15～30 秒间调整，维持至少约 15 秒
+        // 的墙钟缓冲，同时避免原本固定 60 秒在连续 seek 时造成请求风暴。
+        playerItem.preferredForwardBufferDuration = forwardBufferDuration(
+            playbackRate: lastKnownPlaybackRate
+        )
 
         let player = AVPlayer(playerItem: playerItem)
+        player.automaticallyWaitsToMinimizeStalling = true
         playerVC?.player = nil
         playerVC?.player = player
     }
