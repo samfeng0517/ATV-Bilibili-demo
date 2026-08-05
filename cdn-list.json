@@ -8,6 +8,78 @@
     {
       "name": "Bilibili COS",
       "host": "upos-sz-mirrorcosov.bilivideo.com"
+    },
+    {
+      "name": "ali",
+      "host": "upos-sz-mirrorali.bilivideo.com"
+    },
+    {
+      "name": "alib",
+      "host": "upos-sz-mirroralib.bilivideo.com"
+    },
+    {
+      "name": "alio1",
+      "host": "upos-sz-mirroralio1.bilivideo.com"
+    },
+    {
+      "name": "cos",
+      "host": "upos-sz-mirrorcos.bilivideo.com"
+    },
+    {
+      "name": "cosb",
+      "host": "upos-sz-mirrorcosb.bilivideo.com"
+    },
+    {
+      "name": "coso1",
+      "host": "upos-sz-mirrorcoso1.bilivideo.com"
+    },
+    {
+      "name": "hw",
+      "host": "upos-sz-mirrorhw.bilivideo.com"
+    },
+    {
+      "name": "hwb",
+      "host": "upos-sz-mirrorhwb.bilivideo.com"
+    },
+    {
+      "name": "hwo1",
+      "host": "upos-sz-mirrorhwo1.bilivideo.com"
+    },
+    {
+      "name": "08c",
+      "host": "upos-sz-mirror08c.bilivideo.com"
+    },
+    {
+      "name": "08h",
+      "host": "upos-sz-mirror08h.bilivideo.com"
+    },
+    {
+      "name": "08ct",
+      "host": "upos-sz-mirror08ct.bilivideo.com"
+    },
+    {
+      "name": "tf_hw",
+      "host": "upos-tf-all-hw.bilivideo.com"
+    },
+    {
+      "name": "tf_tx",
+      "host": "upos-tf-all-tx.bilivideo.com"
+    },
+    {
+      "name": "akamai",
+      "host": "upos-hz-mirrorakam.akamaized.net"
+    },
+    {
+      "name": "aliov",
+      "host": "upos-sz-mirroraliov.bilivideo.com"
+    },
+    {
+      "name": "hwov",
+      "host": "upos-sz-mirrorhwov.bilivideo.com"
+    },
+    {
+      "name": "hk_bcache",
+      "host": "cn-hk-eq-bcache-01.bilivideo.com"
     }
   ]
 }
