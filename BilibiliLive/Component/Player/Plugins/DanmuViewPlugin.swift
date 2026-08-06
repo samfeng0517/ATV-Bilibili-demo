@@ -123,7 +123,7 @@ extension DanmuViewPlugin: CommonPlayerPlugin {
     func addMenuItems(current: inout [UIMenuElement]) -> [UIMenuElement] {
         let danmuImage = UIImage(systemName: "list.bullet.rectangle.fill")
         let danmuImageDisable = UIImage(systemName: "list.bullet.rectangle")
-        let danmuAction = UIAction(title: "Show Danmu", image: danMuView.isHidden ? danmuImageDisable : danmuImage) {
+        let danmuAction = UIAction(title: "Show Danmu", image: danMuView.isHidden ? danmuImageDisable : danmuImage, identifier: UIAction.Identifier(rawValue: "danmuToggle")) {
             action in
             Defaults.shared.showDanmu.toggle()
             action.image = Defaults.shared.showDanmu ? danmuImage : danmuImageDisable
@@ -134,7 +134,7 @@ extension DanmuViewPlugin: CommonPlayerPlugin {
         let danmuAILevelMenu = UIMenu(title: "弹幕屏蔽等级", options: [.displayInline, .singleSelection], children: [Int32](1...10).map { level in
             UIAction(title: "\(level)", state: level == Settings.danmuAILevel ? .on : .off) { _ in Settings.danmuAILevel = level }
         })
-        let danmuSettingMenu = UIMenu(title: "弹幕设置", image: UIImage(systemName: "keyboard.badge.ellipsis"), children: [danmuDurationMenu, danmuAILevelMenu])
+        let danmuSettingMenu = UIMenu(title: "弹幕设置", image: UIImage(systemName: "keyboard.badge.ellipsis"), identifier: UIMenu.Identifier(rawValue: "danmuSetting"), children: [danmuDurationMenu, danmuAILevelMenu])
 
         return [danmuAction, danmuSettingMenu]
     }

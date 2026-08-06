@@ -161,7 +161,7 @@ class VideoPlayerViewModel {
             }
         }
 
-        // playSpeed 先创建 identifier=setting 的「播放设置」菜单，后续插件（CDN 测速、Debug 等）才能挂进去
+        // playSpeed 创建独立的「播放速度」菜单，以及供后续插件（CDN 测速、Debug 等）使用的「播放设置」菜单
         var plugins: [CommonPlayerPlugin] = [playSpeed, playplugin, danmu, upnp, debug, playlist, qualitySelector]
 
         if let clips = data.clips {

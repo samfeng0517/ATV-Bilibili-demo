@@ -99,6 +99,36 @@ class CommonPlayerViewController: UIViewController {
             let newMenus = activePlugin.addMenuItems(current: &menus)
             menus.append(contentsOf: newMenus)
         }
+
+        let identifier: (UIMenuElement) -> String? = {
+            if let menu = $0 as? UIMenu { return menu.identifier.rawValue }
+            if let action = $0 as? UIAction { return action.identifier.rawValue }
+            return nil
+        }
+
+        // 彈幕設定不再佔用頂層按鈕，改接在播放設定既有項目的最後。
+        let danmuSettingMenus = menus.compactMap { $0 as? UIMenu }.filter { $0.identifier.rawValue == "danmuSetting" }
+        if let settingIndex = menus.firstIndex(where: { identifier($0) == "setting" }),
+           let settingMenu = menus[settingIndex] as? UIMenu
+        {
+            let danmuSettingItems = danmuSettingMenus.flatMap(\.children)
+            menus[settingIndex] = settingMenu.replacingChildren(settingMenu.children + danmuSettingItems)
+        }
+        menus.removeAll { identifier($0) == "danmuSetting" }
+
+        // 字幕、音頻與子母畫面由 AVPlayer 管理；固定其餘自訂項目的相對位置。
+        let orderedIdentifiers = ["playSpeed", "quality", "danmuToggle"]
+        let orderedMenus = orderedIdentifiers.flatMap { expectedIdentifier in
+            menus.filter { identifier($0) == expectedIdentifier }
+        }
+        let settingMenus = menus.filter { identifier($0) == "setting" }
+        let knownIdentifiers = Set(orderedIdentifiers + ["setting"])
+        let otherMenus = menus.filter { element in
+            guard let elementIdentifier = identifier(element) else { return true }
+            return !knownIdentifiers.contains(elementIdentifier)
+        }
+        menus = orderedMenus + otherMenus + settingMenus
+
         playerVC.transportBarCustomMenuItems = menus
     }
 

@@ -76,8 +76,9 @@ class SpeedChangerPlugin: NSObject, CommonPlayerPlugin {
 
     func addMenuItems(current: inout [UIMenuElement]) -> [UIMenuElement] {
         let gearImage = UIImage(systemName: "gearshape")
+        let speedImage = UIImage(systemName: "gauge.with.dots.needle.67percent")
 
-        let speedActions = PlaySpeed.blDefaults.map { playSpeed in
+        let speedActions = PlaySpeed.menuDisplayOrder.map { playSpeed in
             UIAction(title: playSpeed.name, state: currentPlaySpeed == playSpeed ? .on : .off) {
                 [weak self] _ in
                 guard let self else { return }
@@ -86,9 +87,9 @@ class SpeedChangerPlugin: NSObject, CommonPlayerPlugin {
                 currentPlaySpeed = playSpeed
             }
         }
-        let playSpeedMenu = UIMenu(title: "播放速度", options: [.displayInline, .singleSelection], children: speedActions)
-        let menu = UIMenu(title: "播放设置", image: gearImage, identifier: UIMenu.Identifier(rawValue: "setting"), children: [playSpeedMenu])
-        return [menu]
+        let playSpeedMenu = UIMenu(title: "播放速度", image: speedImage, identifier: UIMenu.Identifier(rawValue: "playSpeed"), options: [.singleSelection], children: speedActions)
+        let settingMenu = UIMenu(title: "播放设置", image: gearImage, identifier: UIMenu.Identifier(rawValue: "setting"), children: [])
+        return [playSpeedMenu, settingMenu]
     }
 }
 
@@ -109,4 +110,7 @@ extension PlaySpeed: Equatable {
         PlaySpeed(name: "1.75X", value: 1.75),
         PlaySpeed(name: "2X", value: 2),
     ]
+
+    /// tvOS 打开菜单时会聚焦第一项，因此把最常用的 1X 放在最前面。
+    static let menuDisplayOrder = [PlaySpeed.default] + blDefaults.filter { $0 != .default }
 }
