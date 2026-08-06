@@ -39,6 +39,9 @@ enum Settings {
     @UserDefaultCodable("Settings.mediaPlayerSpeed", defaultValue: PlaySpeed.default)
     static var mediaPlayerSpeed: PlaySpeed
 
+    @UserDefaultCodable("Settings.mediaPlayerSpeedOptions", defaultValue: PlaySpeed.blDefaults.map(\.value))
+    static var mediaPlayerSpeedOptions: [Float]
+
     @UserDefaultCodable("Settings.danmuArea", defaultValue: .style_75)
     static var danmuArea: DanmuArea
 
@@ -146,6 +149,27 @@ enum Settings {
 }
 
 extension Settings {
+    static var visiblePlaySpeeds: [PlaySpeed] {
+        let visibleValues = Set(mediaPlayerSpeedOptions)
+        return PlaySpeed.blDefaults.filter { $0 == .default || visibleValues.contains($0.value) }
+    }
+
+    static func setPlaySpeed(_ playSpeed: PlaySpeed, isVisible: Bool) {
+        guard playSpeed != .default else { return }
+
+        var visibleValues = Set(mediaPlayerSpeedOptions)
+        if isVisible {
+            visibleValues.insert(playSpeed.value)
+        } else {
+            visibleValues.remove(playSpeed.value)
+            if mediaPlayerSpeed == playSpeed {
+                mediaPlayerSpeed = .default
+            }
+        }
+        visibleValues.insert(PlaySpeed.default.value)
+        mediaPlayerSpeedOptions = PlaySpeed.blDefaults.map(\.value).filter { visibleValues.contains($0) }
+    }
+
     static func addHistory(_ query: String, limitSize: Int = 6) {
         if query.isEmpty {
             return

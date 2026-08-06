@@ -78,7 +78,7 @@ class SpeedChangerPlugin: NSObject, CommonPlayerPlugin {
         let gearImage = UIImage(systemName: "gearshape")
         let speedImage = UIImage(systemName: "gauge.with.dots.needle.67percent")
 
-        let speedActions = PlaySpeed.menuDisplayOrder.map { playSpeed in
+        let speedActions = Settings.visiblePlaySpeeds.map { playSpeed in
             UIAction(title: playSpeed.name, state: currentPlaySpeed == playSpeed ? .on : .off) {
                 [weak self] _ in
                 guard let self else { return }
@@ -110,7 +110,4 @@ extension PlaySpeed: Equatable {
         PlaySpeed(name: "1.75X", value: 1.75),
         PlaySpeed(name: "2X", value: 2),
     ]
-
-    /// tvOS 打开菜单时会聚焦第一项，因此把最常用的 1X 放在最前面。
-    static let menuDisplayOrder = [PlaySpeed.default] + blDefaults.filter { $0 != .default }
 }

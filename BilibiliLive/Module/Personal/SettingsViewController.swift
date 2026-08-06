@@ -217,10 +217,13 @@ class SettingsViewController: UIViewController {
                 }
                 Actions(title: "默认播放速度", message: "默认设置为1.0",
                         current: Settings.mediaPlayerSpeed.name,
-                        options: PlaySpeed.blDefaults,
-                        optionString: PlaySpeed.blDefaults.map({ $0.name }))
+                        options: Settings.visiblePlaySpeeds,
+                        optionString: Settings.visiblePlaySpeeds.map({ $0.name }))
                 {
                     Settings.mediaPlayerSpeed = $0
+                }
+                Navigation(title: "倍速選項", desp: "顯示 \(Settings.visiblePlaySpeeds.count) / \(PlaySpeed.blDefaults.count) 項") { [weak self] in
+                    self?.present(PlaybackSpeedCustomizationViewController(), animated: true)
                 }
                 if !BVideoUrlUtils.supportsHEVCHardwareDecoding {
                     Toggle(title: "AVC 優先（卡頓時可嘗試）", setting: Settings.preferAvc, onChange: Settings.preferAvc.toggle())
@@ -649,5 +652,90 @@ extension FeedDisplayStyle {
         case .sideBar:
             return "-"
         }
+    }
+}
+
+final class PlaybackSpeedCustomizationViewController: UIViewController {
+    private let playSpeeds = PlaySpeed.blDefaults
+
+    private let titleLabel: UILabel = {
+        let label = UILabel()
+        label.text = "倍速選項"
+        label.font = .systemFont(ofSize: 44, weight: .semibold)
+        return label
+    }()
+
+    private let hintLabel: UILabel = {
+        let label = UILabel()
+        label.text = "選擇播放器倍速選單要顯示的項目；1X 固定顯示。"
+        label.font = .preferredFont(forTextStyle: .body)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var collectionView: UICollectionView = {
+        let collectionView = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
+        collectionView.dataSource = self
+        collectionView.delegate = self
+        collectionView.remembersLastFocusedIndexPath = false
+        collectionView.register(SettingsSwitchCell.self, forCellWithReuseIdentifier: String(describing: SettingsSwitchCell.self))
+        return collectionView
+    }()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        view.addSubview(titleLabel)
+        view.addSubview(hintLabel)
+        view.addSubview(collectionView)
+
+        titleLabel.snp.makeConstraints { make in
+            make.top.equalTo(view.safeAreaLayoutGuide).offset(50)
+            make.leading.equalToSuperview().offset(100)
+        }
+        hintLabel.snp.makeConstraints { make in
+            make.top.equalTo(titleLabel.snp.bottom).offset(12)
+            make.leading.equalTo(titleLabel)
+        }
+        collectionView.snp.makeConstraints { make in
+            make.top.equalTo(hintLabel.snp.bottom).offset(30)
+            make.leading.trailing.equalToSuperview().inset(100)
+            make.bottom.equalTo(view.safeAreaLayoutGuide)
+        }
+    }
+
+    private func makeLayout() -> UICollectionViewLayout {
+        let itemSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(68))
+        let item = NSCollectionLayoutItem(layoutSize: itemSize)
+        let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(68))
+        let group = NSCollectionLayoutGroup.vertical(layoutSize: groupSize, subitems: [item])
+        let section = NSCollectionLayoutSection(group: group)
+        section.interGroupSpacing = 10
+        return UICollectionViewCompositionalLayout(section: section)
+    }
+
+    private func isVisible(_ playSpeed: PlaySpeed) -> Bool {
+        Settings.visiblePlaySpeeds.contains(playSpeed)
+    }
+}
+
+extension PlaybackSpeedCustomizationViewController: UICollectionViewDataSource, UICollectionViewDelegate {
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        playSpeeds.count
+    }
+
+    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        let cell = collectionView.dequeueReusableCell(withReuseIdentifier: String(describing: SettingsSwitchCell.self), for: indexPath) as! SettingsSwitchCell
+        let playSpeed = playSpeeds[indexPath.item]
+        let description = playSpeed == .default ? "固定顯示" : (isVisible(playSpeed) ? "顯示" : "隱藏")
+        let model = SettingsViewController.CellModel(id: "playSpeed.\(playSpeed.value)", title: playSpeed.name, desp: description, action: nil)
+        cell.set(with: model)
+        return cell
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        let playSpeed = playSpeeds[indexPath.item]
+        Settings.setPlaySpeed(playSpeed, isVisible: !isVisible(playSpeed))
+        collectionView.reloadItems(at: [indexPath])
     }
 }
