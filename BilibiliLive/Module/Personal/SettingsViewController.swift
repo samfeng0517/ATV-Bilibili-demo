@@ -658,6 +658,17 @@ extension FeedDisplayStyle {
 final class PlaybackSpeedCustomizationViewController: UIViewController {
     private let playSpeeds = PlaySpeed.blDefaults
 
+    override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
+        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+        // System blur over the presenting content, the standard tvOS modal appearance.
+        modalPresentationStyle = .blurOverFullScreen
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     private let titleLabel: UILabel = {
         let label = UILabel()
         label.text = "倍速選項"
@@ -678,13 +689,14 @@ final class PlaybackSpeedCustomizationViewController: UIViewController {
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.remembersLastFocusedIndexPath = false
+        collectionView.backgroundColor = .clear
         collectionView.register(SettingsSwitchCell.self, forCellWithReuseIdentifier: String(describing: SettingsSwitchCell.self))
         return collectionView
     }()
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black
+        view.backgroundColor = .clear
         view.addSubview(titleLabel)
         view.addSubview(hintLabel)
         view.addSubview(collectionView)
