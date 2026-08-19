@@ -69,7 +69,6 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
     private var audioRenditionIndex = 0
     private(set) var playInfo: VideoPlayURLInfo?
     private var hasSubtitle = false
-    private var hasPreferSubtitleAdded = false
     private var httpServer = HttpServer()
     private var aid = 0
     private(set) var httpPort = 0
@@ -314,18 +313,15 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
 
     private func addSubtitleData(lang: String, name: String, duration: Int, url: String) {
         var lang = lang
-        var canBeDefault = !hasPreferSubtitleAdded
         if lang.hasPrefix("ai-") {
             lang = String(lang.dropFirst(3))
-            canBeDefault = false
         }
-        if canBeDefault {
-            hasPreferSubtitleAdded = true
-        }
-        let defaultStr = canBeDefault ? "YES" : "NO"
 
+        // B 站字幕不是強制字幕，必須由使用者主動開啟。若把第一條字幕標成
+        // DEFAULT/AUTOSELECT，AVPlayer 在倒退重新載入 WebVTT 時可能短暫重新選中它，
+        // 即使字幕選單目前是「關閉」也會顯示先前快取的字幕。
         let master = """
-        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="\(lang)",NAME="\(name)",AUTOSELECT=\(defaultStr),DEFAULT=\(defaultStr),URI="\(URLs.customPrefix)\(playlists.count)"
+        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="\(lang)",NAME="\(name)",AUTOSELECT=NO,DEFAULT=NO,FORCED=NO,URI="\(URLs.customPrefix)\(playlists.count)"
 
         """
         masterPlaylist.append(master)
