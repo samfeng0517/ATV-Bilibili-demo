@@ -168,6 +168,31 @@ class SettingsViewController: UIViewController {
                 }
             }
 
+            SectionModel(title: "推荐") {
+                Toggle(title: "使用沉浸式浏览模式",
+                       setting: Settings.recommendFeedFlowEnabled,
+                       onChange: Settings.recommendFeedFlowEnabled.toggle())
+                Actions(title: "沉浸式视频时长上限", message: "用于筛选沉浸式推荐中的短视频",
+                        current: Settings.featuredDurationLimit.title,
+                        options: FeaturedDurationLimit.allCases,
+                        optionString: FeaturedDurationLimit.allCases.map { $0.title })
+                {
+                    Settings.featuredDurationLimit = $0
+                }
+                Toggle(title: "沉浸式推荐内容安全过滤",
+                       setting: Settings.featuredContentSafetyFilterEnabled,
+                       onChange: Settings.featuredContentSafetyFilterEnabled.toggle())
+            }
+
+            SectionModel(title: "关注页面") {
+                Toggle(title: "关注刷视频模式",
+                       setting: Settings.followsFeedFlowEnabled,
+                       onChange: Settings.followsFeedFlowEnabled.toggle())
+                { _ in
+                    NotificationCenter.default.post(name: .followsLayoutModeDidChange, object: nil)
+                }
+            }
+
             SectionModel(title: "音视频") {
                 Actions(title: "使用 CDN 節點", message: "自動模式會讓播放前的既有測速流程從所有節點中擇優。",
                         current: CDNNodeStore.selectionDescription,
