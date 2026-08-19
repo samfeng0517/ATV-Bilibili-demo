@@ -97,6 +97,7 @@ class VideoDetailViewController: UIViewController {
     private var subTitles: [SubtitleData]?
 
     private var allUgcEpisodes = [VideoDetail.Info.UgcSeason.UgcVideoInfo]()
+    private let viewAllUgcButton = BLIconTextButton()
 
     private var subscriptions = [AnyCancellable]()
 
@@ -131,6 +132,7 @@ class VideoDetailViewController: UIViewController {
         ugcCollectionView.register(RelatedVideoCell.self, forCellWithReuseIdentifier: String(describing: RelatedVideoCell.self))
         recommandCollectionView.collectionViewLayout = makeRelatedVideoCollectionViewLayout()
         ugcCollectionView.collectionViewLayout = makeRelatedVideoCollectionViewLayout()
+        setupViewAllUgcButton()
         noteView.onPrimaryAction = {
             [weak self] note in
             let detail = ContentDetailViewController.createDesp(content: note.label.text ?? "")
@@ -209,6 +211,34 @@ class VideoDetailViewController: UIViewController {
         pageCollectionViewTopToRangeConstraint?.deactivate()
     }
 
+    private func setupViewAllUgcButton() {
+        ugcView.addSubview(viewAllUgcButton)
+        viewAllUgcButton.title = "查看全部"
+        viewAllUgcButton.titleFont = .systemFont(ofSize: 24, weight: .semibold)
+        viewAllUgcButton.image = UIImage(systemName: "rectangle.stack")
+        viewAllUgcButton.accessibilityLabel = "查看合集全部影片"
+        viewAllUgcButton.onPrimaryAction = { [weak self] _ in
+            self?.presentCurrentUgcSeason()
+        }
+        viewAllUgcButton.snp.makeConstraints { make in
+            make.trailing.equalToSuperview().offset(-88)
+            make.centerY.equalTo(ugcLabel)
+            make.width.equalTo(200)
+            make.height.equalTo(58)
+        }
+        ugcLabel.snp.makeConstraints { make in
+            make.trailing.lessThanOrEqualTo(viewAllUgcButton.snp.leading).offset(-30)
+        }
+    }
+
+    private func presentCurrentUgcSeason() {
+        guard let season = data?.View.ugc_season else { return }
+        present(
+            UgcSeasonViewController(season: UgcSeasonDescriptor(season: season)),
+            animated: true
+        )
+    }
+
     private func updatePageRanges() {
         guard pages.count >= pageRangeSize else {
             pageRanges = []
@@ -272,6 +302,7 @@ class VideoDetailViewController: UIViewController {
         pageView.isHidden = true
         setPageRangeCollectionViewHidden(true)
         ugcView.isHidden = true
+        allUgcEpisodes = []
         do {
             if seasonId > 0 {
                 isBangumi = true
@@ -466,7 +497,7 @@ class VideoDetailViewController: UIViewController {
 
         ugcCollectionView.reloadData()
         ugcLabel.text = "合集 \(data.View.ugc_season?.title ?? "")  \(data.View.ugc_season?.sections.first?.title ?? "")"
-        ugcView.isHidden = allUgcEpisodes.count == 0
+        ugcView.isHidden = data.View.ugc_season == nil
         if allUgcEpisodes.count > 0 {
             ugcCollectionView.scrollToItem(at: IndexPath(item: allUgcEpisodes.map { $0.aid }.firstIndex(of: aid) ?? 0, section: 0), at: .left, animated: false)
         }

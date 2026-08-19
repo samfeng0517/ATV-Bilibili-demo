@@ -45,6 +45,16 @@ class UpSpaceViewController: StandardVideoCollectionViewController<ApiRequest.Up
                 self?.sortByPlayCount = byPlayCount
                 self?.reloadData()
             }
+            headerView.onSeasonsTapped = { [weak self] in
+                guard let self else { return }
+                present(
+                    UpSpaceSeasonsViewController(
+                        mid: mid,
+                        uploaderName: info?.name ?? "使用者"
+                    ),
+                    animated: true
+                )
+            }
         }
         collectionVC.pageSize = 20
     }

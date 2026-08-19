@@ -15,11 +15,13 @@ class UpSpaceTitleSupplementaryView: UICollectionReusableView {
     let followButton = BLCustomButton()
     let blockButton = BLCustomButton()
     let sortButton = BLCustomButton()
+    let seasonsButton = BLCustomButton()
     private let focusGuide = UIFocusGuide()
 
     var onFollowTapped: ((Bool) -> Void)?
     var onBlockTapped: ((Bool) -> Void)?
     var onSortTapped: ((Bool) -> Void)?
+    var onSeasonsTapped: (() -> Void)?
     var mid: Int?
 
     override init(frame: CGRect) {
@@ -39,6 +41,7 @@ class UpSpaceTitleSupplementaryView: UICollectionReusableView {
         addSubview(followButton)
         addSubview(blockButton)
         addSubview(sortButton)
+        addSubview(seasonsButton)
         addLayoutGuide(focusGuide)
 
         imageView.snp.makeConstraints { make in
@@ -74,8 +77,15 @@ class UpSpaceTitleSupplementaryView: UICollectionReusableView {
             make.height.equalTo(80)
         }
 
-        sortButton.snp.makeConstraints { make in
+        seasonsButton.snp.makeConstraints { make in
             make.trailing.equalTo(followButton.snp.leading).offset(-20)
+            make.centerY.equalToSuperview()
+            make.width.equalTo(seasonsButton.snp.height).multipliedBy(20.5 / 18.0)
+            make.height.equalTo(80)
+        }
+
+        sortButton.snp.makeConstraints { make in
+            make.trailing.equalTo(seasonsButton.snp.leading).offset(-20)
             make.centerY.equalToSuperview()
             make.width.equalTo(sortButton.snp.height).multipliedBy(20.5 / 18.0)
             make.height.equalTo(80)
@@ -105,7 +115,14 @@ class UpSpaceTitleSupplementaryView: UICollectionReusableView {
             self?.sortButtonTapped()
         }
 
-        focusGuide.preferredFocusEnvironments = [sortButton, followButton, blockButton]
+        seasonsButton.image = UIImage(systemName: "rectangle.stack")
+        seasonsButton.highLightImage = UIImage(systemName: "rectangle.stack.fill")
+        seasonsButton.accessibilityLabel = "查看建立的合集"
+        seasonsButton.onPrimaryAction = { [weak self] _ in
+            self?.onSeasonsTapped?()
+        }
+
+        focusGuide.preferredFocusEnvironments = [sortButton, seasonsButton, followButton, blockButton]
         focusGuide.snp.makeConstraints { make in
             make.leading.equalToSuperview()
             make.top.bottom.equalTo(sortButton)

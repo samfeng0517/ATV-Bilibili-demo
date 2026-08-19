@@ -50,6 +50,10 @@ enum WebRequest {
         static let favList = "https://api.bilibili.com/x/v3/fav/folder/created/list-all"
         static let favFolderCollectedList = "https://api.bilibili.com/x/v3/fav/folder/collected/list"
         static let favSeason = "https://api.bilibili.com/x/space/fav/season/list"
+        static let upSpaceSeasons = "https://api.bilibili.com/x/polymer/web-space/seasons_series_list"
+        static let upSpaceSeasonArchives = "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list"
+        static let followSeason = "https://api.bilibili.com/x/space/fav/season/add"
+        static let unfollowSeason = "https://api.bilibili.com/x/space/fav/season/del"
         static let reportHistory = "https://api.bilibili.com/x/v2/history/report"
         static let heartbeat = "https://api.bilibili.com/x/click-interface/web/heartbeat"
         static let upSpace = "https://api.bilibili.com/x/space/wbi/arc/search"
@@ -666,6 +670,146 @@ extension WebRequest {
         return resp.relation
     }
 
+    struct UpSpaceSeasonSummary: Codable, Hashable, DisplayData {
+        let season_id: Int
+        let mid: Int
+        let title: String
+        let name: String?
+        let cover: URL?
+        let description: String?
+        let total: Int
+        let ptime: Int?
+
+        var ownerName: String {
+            guard let description, !description.isEmpty else { return "影片合集" }
+            return description
+        }
+
+        var pic: URL? { cover }
+        var date: String? { "共 \(total) 部影片" }
+    }
+
+    struct UpSpaceSeasonPage {
+        let seasons: [UpSpaceSeasonSummary]
+        let returnedEntryCount: Int
+        let hasMore: Bool
+    }
+
+    struct UpSpaceSeasonVideo: Codable, Hashable, PlayableData {
+        struct Stat: Codable, Hashable {
+            let view: Int?
+            let danmaku: Int?
+        }
+
+        let aid: Int
+        let title: String
+        let pic: URL?
+        let duration: Int
+        let pubdate: Int?
+        let stat: Stat?
+
+        var cid: Int { 0 }
+        var ownerName: String { "合集影片" }
+        var date: String? { DateFormatter.stringFor(timestamp: pubdate) }
+        var overlay: DisplayOverlay? {
+            var leftItems = [DisplayOverlay.DisplayOverlayItem]()
+            if let view = stat?.view {
+                leftItems.append(.init(icon: "play.rectangle", text: view.numberString()))
+            }
+            if let danmaku = stat?.danmaku {
+                leftItems.append(.init(icon: "list.bullet.rectangle", text: danmaku.numberString()))
+            }
+            return DisplayOverlay(
+                leftItems: leftItems,
+                rightItems: [.init(icon: nil, text: TimeInterval(duration).timeString())]
+            )
+        }
+    }
+
+    static func requestUpSpaceSeasons(mid: Int, page: Int, pageSize: Int = 20) async throws -> UpSpaceSeasonPage {
+        struct Resp: Codable {
+            struct ItemsLists: Codable {
+                struct Page: Codable {
+                    let page_num: Int
+                    let page_size: Int
+                    let total: Int
+                }
+
+                struct SeriesPreview: Codable {}
+
+                struct SeasonPreview: Codable {
+                    let meta: UpSpaceSeasonSummary
+                }
+
+                let page: Page
+                let seasons_list: [SeasonPreview]?
+                let series_list: [SeriesPreview]?
+            }
+
+            let items_lists: ItemsLists
+        }
+
+        let resp: Resp = try await request(
+            url: EndPoint.upSpaceSeasons,
+            parameters: ["mid": mid, "page_num": page, "page_size": pageSize]
+        )
+        let lists = resp.items_lists
+        let returnedEntryCount = (lists.seasons_list?.count ?? 0) + (lists.series_list?.count ?? 0)
+        return UpSpaceSeasonPage(
+            seasons: lists.seasons_list?.map(\.meta) ?? [],
+            returnedEntryCount: returnedEntryCount,
+            hasMore: lists.page.page_num * lists.page.page_size < lists.page.total
+        )
+    }
+
+    static func requestAllUpSpaceSeasons(mid: Int) async throws -> [UpSpaceSeasonSummary] {
+        var page = 1
+        var seasons = [UpSpaceSeasonSummary]()
+        var seasonIDs = Set<Int>()
+
+        while page <= 50 {
+            let response = try await requestUpSpaceSeasons(mid: mid, page: page)
+            for season in response.seasons {
+                if seasonIDs.insert(season.season_id).inserted {
+                    seasons.append(season)
+                }
+            }
+            guard response.hasMore, response.returnedEntryCount > 0 else { break }
+            page += 1
+        }
+        return seasons
+    }
+
+    static func requestUpSpaceSeasonVideos(mid: Int, seasonId: Int, page: Int, pageSize: Int = 20) async throws -> [UpSpaceSeasonVideo] {
+        struct Resp: Codable {
+            let archives: [UpSpaceSeasonVideo]?
+        }
+
+        let resp: Resp = try await request(
+            url: EndPoint.upSpaceSeasonArchives,
+            parameters: [
+                "mid": mid,
+                "season_id": seasonId,
+                "sort_reverse": false,
+                "page_num": page,
+                "page_size": pageSize,
+            ]
+        )
+        return resp.archives ?? []
+    }
+
+    static func requestIsUgcSeasonFollowed(seasonId: Int) async throws -> Bool {
+        try await requestFavFolderCollectedList().contains { $0.id == seasonId }
+    }
+
+    static func setUgcSeasonFollowed(seasonId: Int, followed: Bool) async throws {
+        _ = try await requestJSON(
+            method: .post,
+            url: followed ? EndPoint.followSeason : EndPoint.unfollowSeason,
+            parameters: ["season_id": seasonId, "platform": "web"]
+        )
+    }
+
     static func logout(complete: (() -> Void)? = nil) {
         request(method: .post, url: EndPoint.logout) {
             (result: Result<[String: String], RequestError>) in
@@ -840,6 +984,7 @@ struct VideoDetail: Codable, Hashable {
             let cover: URL
             let mid: Int
             let intro: String
+            let sign_state: Int?
             let attribute: Int
             let sections: [UgcSeasonDetail]
 

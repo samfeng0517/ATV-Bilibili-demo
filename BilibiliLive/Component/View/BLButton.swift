@@ -141,6 +141,75 @@ class BLCustomTextButton: BLButton {
     }
 }
 
+@MainActor
+class BLIconTextButton: BLButton {
+    private let imageView = UIImageView()
+    private let titleLabel = UILabel()
+    private let stackView = UIStackView()
+
+    var image: UIImage? {
+        didSet { updateAppearance() }
+    }
+
+    var onImage: UIImage? {
+        didSet { updateAppearance() }
+    }
+
+    var title: String? {
+        didSet { titleLabel.text = title }
+    }
+
+    var isOn = false {
+        didSet { updateAppearance() }
+    }
+
+    var titleFont: UIFont = .systemFont(ofSize: 24, weight: .semibold) {
+        didSet { titleLabel.font = titleFont }
+    }
+
+    override func setup() {
+        super.setup()
+
+        stackView.axis = .horizontal
+        stackView.alignment = .center
+        stackView.spacing = 12
+        stackView.isUserInteractionEnabled = false
+        stackView.addArrangedSubview(imageView)
+        stackView.addArrangedSubview(titleLabel)
+        effectView.contentView.addSubview(stackView)
+
+        imageView.contentMode = .scaleAspectFit
+        imageView.snp.makeConstraints { make in
+            make.width.height.equalTo(30)
+        }
+        stackView.snp.makeConstraints { make in
+            make.center.equalToSuperview()
+            make.leading.greaterThanOrEqualToSuperview().offset(20)
+            make.trailing.lessThanOrEqualToSuperview().offset(-20)
+        }
+
+        titleLabel.font = titleFont
+        titleLabel.text = title
+        titleLabel.numberOfLines = 1
+        titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        updateAppearance()
+    }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations {
+            self.updateAppearance()
+        }
+    }
+
+    private func updateAppearance() {
+        let color: UIColor = isFocused ? .black : .white
+        imageView.image = isOn ? (onImage ?? image) : image
+        imageView.tintColor = color
+        titleLabel.textColor = color
+    }
+}
+
 class BLButton: UIControl {
     private var motionEffect: UIInterpolatingMotionEffect!
     fileprivate let effectView = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
