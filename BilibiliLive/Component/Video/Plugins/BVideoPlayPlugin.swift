@@ -593,6 +593,10 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         )
 
         let player = AVPlayer(playerItem: playerItem)
+        // 字幕由使用者透過 AVPlayerViewController 的字幕選單明確控制。
+        // 若保留自動 media selection，倒退造成 HLS/WebVTT 重新載入時，
+        // AVPlayer 可能依系統偏好短暫重新選取已關閉的字幕。
+        player.appliesMediaSelectionCriteriaAutomatically = false
         player.automaticallyWaitsToMinimizeStalling = minimizeStalling
         player.isMuted = isMuted
         guard loadGeneration == generation, !Task.isCancelled else {
