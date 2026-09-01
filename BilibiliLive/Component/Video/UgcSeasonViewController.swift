@@ -108,13 +108,13 @@ final class UgcSeasonViewController: StandardVideoCollectionViewController<WebRe
                 isUpdatingFollowState = false
                 seasonHeaderView?.isFollowing = previousState
                 seasonHeaderView?.isUpdating = false
-                presentFollowError(error)
+                presentFollowError(error, attemptedFollowState: followed)
             }
         }
     }
 
-    private func presentFollowError(_ error: Error) {
-        let action = isFollowing ? "取消追蹤" : "追蹤"
+    private func presentFollowError(_ error: Error, attemptedFollowState: Bool) {
+        let action = attemptedFollowState ? "追蹤" : "取消追蹤"
         let alert = UIAlertController(
             title: "無法\(action)合集",
             message: error.localizedDescription,

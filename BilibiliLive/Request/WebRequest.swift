@@ -373,10 +373,10 @@ extension WebRequest {
     static func requestFavFolderCollectedList() async throws -> [FavListData] {
         guard let mid = ApiRequest.getToken()?.mid else { return [] }
         struct Resp: Codable {
-            let list: [FavListData]
+            let list: [FavListData]?
         }
         let res: Resp = try await request(method: .get, url: EndPoint.favFolderCollectedList, parameters: ["up_mid": mid, "pn": 1, "ps": 100, "platform": "web"])
-        return res.list
+        return res.list ?? []
     }
 
     static func requestFavSeason(seasonId: String, page: Int) async throws -> [FavData] {
