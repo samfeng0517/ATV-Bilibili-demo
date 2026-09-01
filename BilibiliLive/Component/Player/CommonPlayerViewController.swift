@@ -16,6 +16,7 @@ class CommonPlayerViewController: UIViewController {
     private var statusObserver: NSKeyValueObservation?
     private var playToEndObserver: Any?
     private var playbackStalledObserver: Any?
+    private var pendingSkipTarget: CMTime?
     private var isEnd = false
     private var isRestoringFromPip = false
     /// 新 AVPlayerItem ready 后是否自动 play。换 CDN host 等场景可临时关掉，由调用方按用户暂停状态决定是否续播。
@@ -35,6 +36,12 @@ class CommonPlayerViewController: UIViewController {
         playerVC.view.snp.makeConstraints { $0.edges.equalToSuperview() }
         playerVC.showsPlaybackControls = showsPlaybackControls
         playerVC.allowsPictureInPicturePlayback = allowsPictureInPicturePlayback
+        // tvOS 18+ 的預設倒轉操作會依「倒轉時顯示字幕」系統設定，暫時開啟
+        // 原本已關閉的字幕。改由 delegate 執行同樣的 10 秒 seek，讓字幕選擇只
+        // 受使用者在播放器字幕選單中的明確操作影響。
+        playerVC.skippingBehavior = .skipItem
+        playerVC.isSkipForwardEnabled = true
+        playerVC.isSkipBackwardEnabled = true
         playerVC.delegate = self
 
         let playerObservation = playerVC.observe(\.player, options: [.old, .new]) { [weak self] vc, obs in
@@ -190,6 +197,7 @@ class CommonPlayerViewController: UIViewController {
 
 extension CommonPlayerViewController {
     private func playerDidChange(player: AVPlayer?) {
+        pendingSkipTarget = nil
         if let player {
             activePlugins.forEach { $0.playerDidChange(player: player) }
             rateObserver = player.observe(\.rate, options: [.old, .new]) {
@@ -258,6 +266,39 @@ extension CommonPlayerViewController {
 }
 
 extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
+    func skipToPreviousItem(for playerViewController: AVPlayerViewController) {
+        skip(by: -10, in: playerViewController)
+    }
+
+    func skipToNextItem(for playerViewController: AVPlayerViewController) {
+        skip(by: 10, in: playerViewController)
+    }
+
+    private func skip(by interval: TimeInterval, in playerViewController: AVPlayerViewController) {
+        guard let player = playerViewController.player else { return }
+
+        let baseTime = pendingSkipTarget ?? player.currentTime()
+        guard baseTime.isNumeric else { return }
+
+        var targetSeconds = max(0, baseTime.seconds + interval)
+        if let duration = player.currentItem?.duration, duration.isNumeric {
+            targetSeconds = min(targetSeconds, duration.seconds)
+        }
+
+        let target = CMTime(seconds: targetSeconds, preferredTimescale: 600)
+        pendingSkipTarget = target
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] _ in
+            DispatchQueue.main.async {
+                guard let self,
+                      player === playerViewController.player,
+                      let pendingSkipTarget = self.pendingSkipTarget,
+                      CMTimeCompare(pendingSkipTarget, target) == 0
+                else { return }
+                self.pendingSkipTarget = nil
+            }
+        }
+    }
+
     @objc func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
         if let presentedViewController = UIViewController.topMostViewController() as? CommonPlayerViewController,
            presentedViewController.playerVC == playerViewController
