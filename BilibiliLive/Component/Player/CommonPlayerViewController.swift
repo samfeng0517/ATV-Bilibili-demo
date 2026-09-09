@@ -16,7 +16,10 @@ class CommonPlayerViewController: UIViewController {
     private var statusObserver: NSKeyValueObservation?
     private var playToEndObserver: Any?
     private var playbackStalledObserver: Any?
-    private var pendingSkipTarget: CMTime?
+    private var subtitleSelectionObserver: Any?
+    private var selectedSubtitleOption: AVMediaSelectionOption?
+    private var subtitleSelectionGroup: AVMediaSelectionGroup?
+    private var subtitleSelectionTask: Task<Void, Never>?
     private var isEnd = false
     private var isRestoringFromPip = false
     /// 新 AVPlayerItem ready 后是否自动 play。换 CDN host 等场景可临时关掉，由调用方按用户暂停状态决定是否续播。
@@ -36,12 +39,7 @@ class CommonPlayerViewController: UIViewController {
         playerVC.view.snp.makeConstraints { $0.edges.equalToSuperview() }
         playerVC.showsPlaybackControls = showsPlaybackControls
         playerVC.allowsPictureInPicturePlayback = allowsPictureInPicturePlayback
-        // tvOS 18+ 的預設倒轉操作會依「倒轉時顯示字幕」系統設定，暫時開啟
-        // 原本已關閉的字幕。改由 delegate 執行同樣的 10 秒 seek，讓字幕選擇只
-        // 受使用者在播放器字幕選單中的明確操作影響。
-        playerVC.skippingBehavior = .skipItem
-        playerVC.isSkipForwardEnabled = true
-        playerVC.isSkipBackwardEnabled = true
+        // 保留 AVKit 原生快轉、倒轉與連續操作的行為。
         playerVC.delegate = self
 
         let playerObservation = playerVC.observe(\.player, options: [.old, .new]) { [weak self] vc, obs in
@@ -182,6 +180,7 @@ class CommonPlayerViewController: UIViewController {
     }
 
     private func cleanUpObserver() {
+        cleanUpSubtitleSelection()
         rateObserver = nil
         statusObserver = nil
         if let playToEndObserver {
@@ -197,7 +196,7 @@ class CommonPlayerViewController: UIViewController {
 
 extension CommonPlayerViewController {
     private func playerDidChange(player: AVPlayer?) {
-        pendingSkipTarget = nil
+        cleanUpSubtitleSelection()
         if let player {
             activePlugins.forEach { $0.playerDidChange(player: player) }
             rateObserver = player.observe(\.rate, options: [.old, .new]) {
@@ -215,6 +214,48 @@ extension CommonPlayerViewController {
         }
     }
 
+    private func cleanUpSubtitleSelection() {
+        subtitleSelectionTask?.cancel()
+        subtitleSelectionTask = nil
+        subtitleSelectionGroup = nil
+        if let subtitleSelectionObserver {
+            NotificationCenter.default.removeObserver(subtitleSelectionObserver)
+        }
+        subtitleSelectionObserver = nil
+        selectedSubtitleOption = nil
+    }
+
+    private func observeSubtitleSelection(_ item: AVPlayerItem) {
+        cleanUpSubtitleSelection()
+        // 只管理明確停用自動媒體選擇的影片播放器，不介入直播等其他來源。
+        guard playerVC.player?.appliesMediaSelectionCriteriaAutomatically == false else { return }
+        subtitleSelectionTask = Task { @MainActor [weak self, weak item] in
+            guard let item,
+                  let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
+                  !Task.isCancelled,
+                  let self, self.playerVC.player?.currentItem === item
+            else { return }
+            self.subtitleSelectionGroup = group
+            self.selectedSubtitleOption = item.currentMediaSelection.selectedMediaOption(in: group)
+            self.subtitleSelectionObserver = NotificationCenter.default.addObserver(
+                forName: AVPlayerItem.mediaSelectionDidChangeNotification, object: item, queue: .main
+            ) { [weak self, weak item] _ in
+                // 使用者選單操作也會先發出通知。等 delegate 記錄新選擇後再比對，
+                // 避免把使用者剛開啟的字幕還原成關閉。
+                DispatchQueue.main.async { [weak self, weak item] in
+                    guard let self, let item,
+                          self.subtitleSelectionObserver != nil,
+                          self.playerVC.player?.currentItem === item,
+                          let group = self.subtitleSelectionGroup
+                    else { return }
+                    let selected = item.currentMediaSelection.selectedMediaOption(in: group)
+                    guard selected != self.selectedSubtitleOption else { return }
+                    item.select(self.selectedSubtitleOption, in: group)
+                }
+            }
+        }
+    }
+
     private func playerRateDidChange(player: AVPlayer) {
         if player.rate > 0 {
             activePlugins.forEach { $0.playerDidStart(player: player) }
@@ -227,6 +268,7 @@ extension CommonPlayerViewController {
     }
 
     private func observePlayerItem(_ playerItem: AVPlayerItem) {
+        observeSubtitleSelection(playerItem)
         statusObserver = playerItem.observe(\.status, options: [.new, .old]) {
             [weak self] item, _ in
             guard let self, let player = playerVC.player else { return }
@@ -266,37 +308,16 @@ extension CommonPlayerViewController {
 }
 
 extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
-    func skipToPreviousItem(for playerViewController: AVPlayerViewController) {
-        skip(by: -10, in: playerViewController)
-    }
-
-    func skipToNextItem(for playerViewController: AVPlayerViewController) {
-        skip(by: 10, in: playerViewController)
-    }
-
-    private func skip(by interval: TimeInterval, in playerViewController: AVPlayerViewController) {
-        guard let player = playerViewController.player else { return }
-
-        let baseTime = pendingSkipTarget ?? player.currentTime()
-        guard baseTime.isNumeric else { return }
-
-        var targetSeconds = max(0, baseTime.seconds + interval)
-        if let duration = player.currentItem?.duration, duration.isNumeric {
-            targetSeconds = min(targetSeconds, duration.seconds)
-        }
-
-        let target = CMTime(seconds: targetSeconds, preferredTimescale: 600)
-        pendingSkipTarget = target
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] _ in
-            DispatchQueue.main.async {
-                guard let self,
-                      player === playerViewController.player,
-                      let pendingSkipTarget = self.pendingSkipTarget,
-                      CMTimeCompare(pendingSkipTarget, target) == 0
-                else { return }
-                self.pendingSkipTarget = nil
-            }
-        }
+    func playerViewController(_ playerViewController: AVPlayerViewController,
+                              didSelect mediaSelectionOption: AVMediaSelectionOption?,
+                              in mediaSelectionGroup: AVMediaSelectionGroup)
+    {
+        guard subtitleSelectionObserver != nil,
+              let group = subtitleSelectionGroup,
+              group == mediaSelectionGroup
+        else { return }
+        // 只有字幕選單的明確操作更新偏好；系統暫時選取／取消字幕不改寫它。
+        selectedSubtitleOption = mediaSelectionOption
     }
 
     @objc func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
