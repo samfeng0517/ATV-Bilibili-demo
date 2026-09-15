@@ -21,7 +21,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         AccountManager.shared.bootstrap()
         BiliBiliUpnpDMR.shared.start()
         URLSession.shared.configuration.headers.add(.userAgent("BiLiBiLi AppleTV Client/1.0.0 (github/yichengchen/ATV-Bilibili-live-demo)"))
-        window = UIWindow()
+        WebRequest.requestIndex()
+        return true
+    }
+
+    func connectWindow(_ window: UIWindow) {
+        self.window = window
         if ApiRequest.isLogin() {
             if let expireDate = ApiRequest.getToken()?.expireDate {
                 let now = Date()
@@ -31,16 +36,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             } else {
                 ApiRequest.refreshToken()
             }
-            window?.rootViewController = BLTabBarViewController()
+            window.rootViewController = BLTabBarViewController()
         } else {
-            window?.rootViewController = LoginViewController.create()
+            window.rootViewController = LoginViewController.create()
         }
-        WebRequest.requestIndex()
-        window?.makeKeyAndVisible()
-        return true
+        window.makeKeyAndVisible()
     }
 
-    func applicationDidBecomeActive(_ application: UIApplication) {
+    func sceneDidBecomeActive() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         Task {
             await CDNListUpdater.shared.updateIfNeeded()

@@ -6,7 +6,7 @@ Read the relevant section when changing that subsystem. Verify implementation de
 
 The app uses a layered architecture with a factory-based navigation system:
 
-**Entry Point:** `AppDelegate.swift` checks login state and routes to either `LoginViewController` (QR code auth) or `BLTabBarViewController`.
+**Entry Point:** `AppDelegate.swift` initializes shared services. `SceneDelegate.swift` creates the scene's window and asks `AppDelegate` to check login state and route to either `LoginViewController` (QR code auth) or `BLTabBarViewController`. The app uses a single scene; `AppDelegate.window` retains access for existing navigation and casting flows. Foreground activation work runs from `SceneDelegate.sceneDidBecomeActive`.
 
 **Module Layer** (`BilibiliLive/Module/`) — Feature-specific view controllers:
 - `Tabbar/` — Root navigation; `BLTabBarViewController` uses `TabBarPageFactory` to create tab VCs dynamically based on user-customizable ordering
