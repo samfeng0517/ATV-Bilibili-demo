@@ -22,8 +22,6 @@ class CommonPlayerViewController: UIViewController {
     private var subtitleSelectionTask: Task<Void, Never>?
     private var isEnd = false
     private var isRestoringFromPip = false
-    /// 新 AVPlayerItem ready 后是否自动 play。换 CDN host 等场景可临时关掉，由调用方按用户暂停状态决定是否续播。
-    var autoPlayWhenReady = true
     var showsPlaybackControls = true
     var allowsPictureInPicturePlayback = true
 
@@ -269,15 +267,17 @@ extension CommonPlayerViewController {
 
     private func observePlayerItem(_ playerItem: AVPlayerItem) {
         observeSubtitleSelection(playerItem)
-        statusObserver = playerItem.observe(\.status, options: [.new, .old]) {
-            [weak self] item, _ in
-            guard let self, let player = playerVC.player else { return }
+        statusObserver = playerItem.observe(\.status, options: [.initial, .new, .old]) {
+            [weak self] item, change in
+            guard let self, let player = playerVC.player,
+                  player.currentItem === item, change.oldValue != change.newValue
+            else { return }
             switch item.status {
             case .readyToPlay:
                 isEnd = false
                 activePlugins.forEach { $0.playerWillStart(player: player) }
                 playerWillStart(player: player)
-                if autoPlayWhenReady {
+                if !activePlugins.contains(where: { $0.handlesPlaybackStart }) {
                     player.play()
                 }
             case .failed:

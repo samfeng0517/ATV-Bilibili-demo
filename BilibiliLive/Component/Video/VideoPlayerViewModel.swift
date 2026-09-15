@@ -42,6 +42,8 @@ class VideoPlayerViewModel {
     private let startTimeOverride: Int?
     private let startTimeOverrideContentIdentity: String
     private var videoDetail: VideoDetail?
+    // 同一次播放流程沿用使用者最後選擇的倍速。
+    private var currentPlaySpeed = Settings.mediaPlayerSpeed
     private var cancellable = Set<AnyCancellable>()
     private var loadTask: Task<Void, Never>?
     private var loadGeneration = 0
@@ -292,6 +294,7 @@ class VideoPlayerViewModel {
                                           reportWatchHistory: playMode != .preview,
                                           minimizeStalling: true,
                                           isMuted: playMode == .preview && previewMuted,
+                                          initialPlaybackRate: currentPlaySpeed.value,
                                           mediaWarmupManager: playMode == .feedFlow ? mediaWarmupManager : nil)
         playplugin.onLoadFailure = { [weak self] message in
             self?.loadResult.send(.failure(message))
@@ -307,8 +310,9 @@ class VideoPlayerViewModel {
         debug.additionDebugInfo = { [weak playplugin] in
             playplugin?.networkDebugInfo ?? ""
         }
-        let playSpeed = SpeedChangerPlugin()
-        playSpeed.$currentPlaySpeed.sink { [weak danmu] speed in
+        let playSpeed = SpeedChangerPlugin(initialSpeed: currentPlaySpeed)
+        playSpeed.$currentPlaySpeed.sink { [weak self, weak danmu] speed in
+            self?.currentPlaySpeed = speed
             danmu?.danMuView.playingSpeed = speed.value
         }.store(in: &cancellable)
 

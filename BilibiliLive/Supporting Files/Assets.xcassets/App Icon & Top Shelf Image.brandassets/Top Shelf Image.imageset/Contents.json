@@ -1,25 +1,18 @@
 {
-  "images" : [
+  "images": [
     {
-      "filename" : "Bilibili-Wallpapers-3 (1).jpg",
-      "idiom" : "tv",
-      "scale" : "1x"
+      "filename": "bilibili-shelf-1920x720.png",
+      "idiom": "tv",
+      "scale": "1x"
     },
     {
-      "idiom" : "tv",
-      "scale" : "2x"
-    },
-    {
-      "idiom" : "tv-marketing",
-      "scale" : "1x"
-    },
-    {
-      "idiom" : "tv-marketing",
-      "scale" : "2x"
+      "filename": "bilibili-shelf-3840x1440.png",
+      "idiom": "tv",
+      "scale": "2x"
     }
   ],
-  "info" : {
-    "author" : "xcode",
-    "version" : 1
+  "info": {
+    "author": "xcode",
+    "version": 1
   }
 }

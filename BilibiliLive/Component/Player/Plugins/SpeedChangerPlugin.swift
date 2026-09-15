@@ -14,7 +14,12 @@ class SpeedChangerPlugin: NSObject, CommonPlayerPlugin {
     private weak var playerVC: AVPlayerViewController?
     private var hasShownSpeedNotification = false
 
-    @Published private(set) var currentPlaySpeed: PlaySpeed = .default
+    @Published private(set) var currentPlaySpeed: PlaySpeed
+
+    init(initialSpeed: PlaySpeed = Settings.mediaPlayerSpeed) {
+        currentPlaySpeed = initialSpeed
+        super.init()
+    }
 
     func addViewToPlayerOverlay(container: UIView) {
         containerView = container
@@ -30,8 +35,6 @@ class SpeedChangerPlugin: NSObject, CommonPlayerPlugin {
 
     func playerDidLoad(playerVC: AVPlayerViewController) {
         self.playerVC = playerVC
-
-        currentPlaySpeed = Settings.mediaPlayerSpeed
     }
 
     func playerDidChange(player: AVPlayer) {
@@ -39,6 +42,7 @@ class SpeedChangerPlugin: NSObject, CommonPlayerPlugin {
     }
 
     func playerWillStart(player: AVPlayer) {
+        player.currentItem?.audioTimePitchAlgorithm = .timeDomain
         playerVC?.selectSpeed(AVPlaybackSpeed(rate: currentPlaySpeed.value, localizedName: currentPlaySpeed.name))
     }
 

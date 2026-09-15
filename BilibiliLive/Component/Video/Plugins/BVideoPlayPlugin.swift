@@ -20,7 +20,8 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private let isMuted: Bool
     private let mediaWarmupManager: PlayerMediaWarmupManager?
     private var currentQualityId: Int?
-    private var currentPlaybackTime: Double = 0
+    private var pendingPlaybackStart: (time: CMTime, shouldResume: Bool)?
+    var handlesPlaybackStart: Bool { true }
     // 記錄最近一次實際使用的畫質模式，切換 CDN host 時原樣復用。
     private var currentQualitySelection = BVideoQualitySelection.settingsDefault
 
@@ -29,7 +30,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private var lastDroppedFrames = 0
     private var cdnProbeReport = ""
     private var isProbingCDN = false
-    private var lastKnownPlaybackRate = max(1, Double(Settings.mediaPlayerSpeed.value))
+    private var lastKnownPlaybackRate: Double
 
     // 运行时 CDN 健康检测：根据真实卡顿或 AVPlayer 的 keep-up 缓冲风险换 host，
     // 不单独用 observed/indicated 比特率比（indicated 常是峰值，低一些仍可能流畅）。
@@ -41,10 +42,10 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     /// 换完 host 后的冷静期，避免连续误触发
     private let hostSwitchCooldown: TimeInterval = 30
     private let networkLogInterval: TimeInterval = 5
-    /// preferredForwardBufferDuration 是媒体时间；倍速播放时必须按速率放大，
-    /// 才能维持相同的实际可播放秒数。上限 30 秒，避免恢复到 60 秒造成 seek 请求风暴。
+    /// 以實際可播放時間設定緩衝；1.75x 以上提高到 20 秒，上限 40 媒體秒，
+    /// 避免直接回到固定 60 秒而增加 seek 的分片請求負擔。
     private let baseForwardBufferDuration: TimeInterval = 15
-    private let maximumForwardBufferDuration: TimeInterval = 30
+    private let maximumForwardBufferDuration: TimeInterval = 40
     /// CDN 实测吞吐至少要高于「平均码率 × 播放速度」一些，才能吸收分片峰值与网络抖动。
     private let throughputHeadroom = 1.25
     private var loadTask: Task<Void, Never>?
@@ -55,6 +56,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
          reportWatchHistory: Bool = true,
          minimizeStalling: Bool = true,
          isMuted: Bool = false,
+         initialPlaybackRate: Float = Settings.mediaPlayerSpeed.value,
          mediaWarmupManager: PlayerMediaWarmupManager? = nil)
     {
         self.playInfo = playInfo
@@ -62,6 +64,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         self.reportWatchHistory = reportWatchHistory
         self.minimizeStalling = minimizeStalling
         self.isMuted = isMuted
+        lastKnownPlaybackRate = Double(initialPlaybackRate)
         self.mediaWarmupManager = mediaWarmupManager
         currentQualityId = playData.videoPlayURLInfo.quality
     }
@@ -91,8 +94,33 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     func playerWillStart(player: AVPlayer) {
-        if let playerStartPos = playData.playerStartPos {
-            player.seek(to: CMTime(seconds: Double(playerStartPos), preferredTimescale: 1), toleranceBefore: .zero, toleranceAfter: .zero)
+        guard let start = pendingPlaybackStart else { return }
+        pendingPlaybackStart = nil
+        let generation = loadGeneration
+        // 等所有 ready hooks（含倍速設定）完成後才跳轉；舊載入的完成回呼不得啟動新影片。
+        Task { @MainActor [weak self, weak player] in
+            guard let self, let player,
+                  self.loadGeneration == generation, self.playerVC?.player === player
+            else { return }
+            player.pause()
+            let restored: Bool
+            if start.time > .zero {
+                restored = await player.seek(to: start.time,
+                                             toleranceBefore: .zero,
+                                             toleranceAfter: .zero)
+            } else {
+                restored = true
+            }
+            guard self.loadGeneration == generation, self.playerVC?.player === player,
+                  !Task.isCancelled
+            else { return }
+            guard restored else {
+                Logger.warn("[player] 恢復播放進度失敗，保持暫停")
+                return
+            }
+            if start.shouldResume {
+                player.play()
+            }
         }
     }
 
@@ -218,8 +246,8 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     private func forwardBufferDuration(playbackRate: Double) -> TimeInterval {
-        min(maximumForwardBufferDuration,
-            baseForwardBufferDuration * max(1, playbackRate))
+        let playableSeconds: TimeInterval = playbackRate >= 1.75 ? 20 : baseForwardBufferDuration
+        return min(maximumForwardBufferDuration, playableSeconds * max(1, playbackRate))
     }
 
     private func updateForwardBuffer(for player: AVPlayer) {
@@ -267,7 +295,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
         // loadedTimeRanges 以媒体秒计。倍速越高，同样的媒体缓冲可支撑的墙钟时间越短；
         // likelyToKeepUp 已转差且缓冲不足时提前处理，不必等到真正停住才开始测速。
-        let lowBufferThreshold = 10 * playbackRate
+        let lowBufferThreshold = (playbackRate >= 1.75 ? 12 : 10) * playbackRate
         let isRunningOutOfBuffer = !isLikelyToKeepUp && buffered < lowBufferThreshold
         let unhealthy = isWaitingToPlay || stallDelta > 0 || isRunningOutOfBuffer
         if unhealthy {
@@ -299,13 +327,22 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         defer { isEvaluatingHostSwitch = false }
 
         Logger.info("[cdn] \(currentHost) 因卡顿重新测速 \(candidates.count) 个候选")
-        let results = await CDNDiagnostics.probeAll(urls: candidates)
+        let generation = loadGeneration
+        let results = await CDNDiagnostics.probeForRecovery(urls: candidates, currentHost: currentHost, requiredMbps: requiredMbps)
+        guard loadGeneration == generation, playerVC?.player != nil else { return }
         // 测速是异步的，期间用户可能已手动暂停；换源会重建 AVPlayer，必须取消
         guard !isUserPaused else {
             Logger.info("[cdn] 用户已暂停，取消 host 切换")
             return
         }
-        let ranked = results.filter { $0.mbps != nil }.sorted { ($0.mbps ?? -1) > ($1.mbps ?? -1) }
+        // 測速期間若下載已追上，就不再重建播放器造成一次額外緩衝。
+        if let player = playerVC?.player, let item = player.currentItem,
+           !isWaitingToPlay, item.isPlaybackLikelyToKeepUp,
+           bufferedSeconds(of: item) >= 10 * effectivePlaybackRate(for: player)
+        {
+            return
+        }
+        let ranked = results.filter { $0.effectiveMbps != nil }.sorted { ($0.effectiveMbps ?? -1) > ($1.effectiveMbps ?? -1) }
         guard !ranked.isEmpty else {
             Logger.info("[cdn] 候选测速全部失败，保持 \(currentHost)")
             return
@@ -313,11 +350,11 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
         // 优先更快的非当前节点；若短测速仍显示当前最快，则取第二名做强制尝试
         let alternate = ranked.first(where: { $0.host != currentHost })
-        guard let target = alternate, let targetMbps = target.mbps else {
+        guard let target = alternate, let targetMbps = target.effectiveMbps else {
             Logger.info("[cdn] 没有其他可用候选，保持 \(currentHost)")
             return
         }
-        let currentMbps = ranked.first(where: { $0.host == currentHost })?.mbps
+        let currentMbps = ranked.first(where: { $0.host == currentHost })?.effectiveMbps
         let reason: String
         if requiredMbps > 0, targetMbps >= requiredMbps,
            currentMbps.map({ $0 < requiredMbps }) ?? true
@@ -342,26 +379,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
     @MainActor
     private func switchHost(to host: String) async {
-        guard let player = playerVC?.player else { return }
-        // 必须在换源前记下播放意图：新 AVPlayer 默认就是 .paused，换源后再读 isUserPaused 会误判成用户暂停
-        let shouldResume = !isUserPaused
-        guard shouldResume else {
-            Logger.info("[cdn] 用户已暂停，取消 host 切换")
-            return
-        }
-        let currentTime = player.currentTime().seconds
-        guard currentTime > 0 else { return }
-        currentPlaybackTime = currentTime
-
-        // 关掉 readyToPlay 自动 play，改由下面按 shouldResume 显式 play；异步恢复默认，避开尚未送达的 status KVO
-        let commonVC = playerVC?.parent as? CommonPlayerViewController
-        commonVC?.autoPlayWhenReady = false
-        defer {
-            DispatchQueue.main.async {
-                commonVC?.autoPlayWhenReady = true
-            }
-        }
-
+        guard playerVC?.player != nil, !isUserPaused else { return }
         do {
             let generation = beginLoadGeneration()
             try await playmedia(urlInfo: playData.videoPlayURLInfo,
@@ -370,19 +388,6 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
                                 qualitySelection: currentQualitySelection,
                                 preferredHost: host,
                                 isQualitySwitch: true)
-            guard loadGeneration == generation,
-                  !Task.isCancelled,
-                  let newPlayer = playerVC?.player
-            else { return }
-            await newPlayer.seek(to: CMTime(seconds: currentPlaybackTime, preferredTimescale: 1),
-                                 toleranceBefore: .zero,
-                                 toleranceAfter: .zero)
-            guard loadGeneration == generation, !Task.isCancelled else { return }
-            if shouldResume {
-                newPlayer.play()
-            } else {
-                newPlayer.pause()
-            }
         } catch is CancellationError {
             return
         } catch {
@@ -451,6 +456,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         loadTask = nil
         loadGeneration += 1
         playerDelegate = nil
+        pendingPlaybackStart = nil
         if tearingDown {
             playerVC = nil
         }
@@ -483,6 +489,13 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         // The await above may finish after a newer load generation. Validate
         // before retaining its resource-loader delegate or touching the player.
         let playerVC = try ensureActiveLoad(generation)
+        if isQualitySwitch, let oldPlayer = playerVC.player {
+            let seconds = oldPlayer.currentTime().seconds
+            guard seconds.isFinite, seconds >= 0 else {
+                Logger.warn("[player] 無有效播放進度，取消切換")
+                return
+            }
+        }
         let delegate = prepared.delegate
         playerDelegate = delegate
         currentQualitySelection = qualitySelection
@@ -494,7 +507,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             playerVC.appliesPreferredDisplayCriteriaAutomatically = shouldApplyContentMatch(delegate: delegate)
         }
 
-        await prepare(toPlay: prepared.asset, generation: generation)
+        await prepare(toPlay: prepared.asset, generation: generation, preservingPlayback: isQualitySwitch)
     }
 
     private func preparedMedia(urlInfo: VideoPlayURLInfo,
@@ -531,12 +544,8 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
     @MainActor
     func switchQuality(to selection: BVideoQualitySelection) async {
-        guard let player = playerVC?.player else { return }
+        guard playerVC?.player != nil else { return }
 
-        let currentTime = player.currentTime().seconds
-
-        // 保存当前播放位置
-        currentPlaybackTime = currentTime.isFinite ? max(0, currentTime) : 0
         currentQualityId = selection.qualityId
 
         // 重新加载视频，使用新的画质
@@ -547,20 +556,6 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
                                 generation: generation,
                                 qualitySelection: selection,
                                 isQualitySwitch: true)
-
-            // 恢复播放位置并继续播放
-            guard loadGeneration == generation,
-                  !Task.isCancelled,
-                  playerVC != nil,
-                  let newPlayer = playerVC?.player
-            else { return }
-            if currentPlaybackTime > 0 {
-                await newPlayer.seek(to: CMTime(seconds: currentPlaybackTime, preferredTimescale: 1),
-                                     toleranceBefore: .zero,
-                                     toleranceAfter: .zero)
-            }
-            guard loadGeneration == generation, !Task.isCancelled else { return }
-            newPlayer.play()
         } catch is CancellationError {
             return
         } catch {
@@ -575,7 +570,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     @MainActor
-    func prepare(toPlay asset: AVURLAsset, generation: Int) async {
+    private func prepare(toPlay asset: AVURLAsset, generation: Int, preservingPlayback: Bool) async {
         guard loadGeneration == generation,
               !Task.isCancelled,
               let playerVC
@@ -586,8 +581,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         // 0 表示无限制，让 AVPlayer 根据网络条件自动选择最高可用码率
         playerItem.preferredPeakBitRate = 0
 
-        // 倍速会更快消耗媒体时间缓冲。依当前设置在 15～30 秒间调整，维持至少约 15 秒
-        // 的墙钟缓冲，同时避免原本固定 60 秒在连续 seek 时造成请求风暴。
+        // 1.75x／2x 保留約 20 秒實際播放緩衝，其餘速率保留原本約 15 秒。
         playerItem.preferredForwardBufferDuration = forwardBufferDuration(
             playbackRate: lastKnownPlaybackRate
         )
@@ -603,6 +597,14 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             player.pause()
             player.replaceCurrentItem(with: nil)
             return
+        }
+        // 準備新來源期間舊播放器仍可前進或被暫停，因此在替換前才擷取最新狀態。
+        if preservingPlayback, let oldPlayer = playerVC.player {
+            let time = oldPlayer.currentTime()
+            pendingPlaybackStart = (time, oldPlayer.timeControlStatus != .paused)
+        } else {
+            let seconds = max(0, playData.playerStartPos ?? 0)
+            pendingPlaybackStart = (CMTime(seconds: Double(seconds), preferredTimescale: 600), true)
         }
         playerVC.player = nil
         guard loadGeneration == generation, !Task.isCancelled else {

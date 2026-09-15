@@ -32,9 +32,16 @@ enum CDNDiagnostics {
             guard error == nil, transferTime > 0, bytes > 0 else { return nil }
             return Double(bytes) * 8 / transferTime / 1_000_000
         }
+
+        /// 小樣本也計入連線與首位元組等待，避免高延遲節點的瞬間傳輸速率過度樂觀。
+        var effectiveMbps: Double? {
+            let elapsed = setupTime + transferTime
+            guard error == nil, elapsed > 0, bytes > 0 else { return nil }
+            return Double(bytes) * 8 / elapsed / 1_000_000
+        }
     }
 
-    /// 菜单手动测速 / 运行时切换：较大样本，结果更稳
+    /// 選單手動完整測速使用較大樣本，結果更穩
     private static let fullProbeBytes = 2 * 1024 * 1024
     /// 起播择优只需要快速分辨可用性与相对速度。所有候选会并行请求，因此保持小样本，
     /// 避免节点很多时同时下载过多数据、反而让候选互相抢带宽。
@@ -81,10 +88,29 @@ enum CDNDiagnostics {
         return Session(configuration: config)
     }()
 
-    /// 逐个实测所有候选，返回原始结果供调用方自行判断（如运行时健康检测比较吞吐）。
+    /// 逐個實測所有候選，供手動完整測速報告使用。
     /// 顺序测而非并发：并发会让候选互相抢带宽导致结果失真。
     static func probeAll(urls: [String]) async -> [ProbeResult] {
         await probeAll(urls: urls, bytes: fullProbeBytes, session: session)
+    }
+
+    /// 播放中避免完整测速搶占頻寬：最多試三個備援，足夠快就立即返回。
+    /// 若備援均不足，才測目前節點供呼叫端比較，避免盲目切到更慢的來源。
+    static func probeForRecovery(urls: [String], currentHost: String, requiredMbps: Double) async -> [ProbeResult] {
+        var results = [ProbeResult]()
+        let alternatives = urls.filter { URLComponents(string: $0)?.host != currentHost }
+        for url in alternatives.prefix(3) {
+            guard !Task.isCancelled else { return results }
+            let result = await probe(url: url, bytes: 256 * 1024, session: quickSession)
+            results.append(result)
+            if requiredMbps > 0, let speed = result.effectiveMbps, speed >= requiredMbps {
+                return results
+            }
+        }
+        if !Task.isCancelled, let current = urls.first(where: { URLComponents(string: $0)?.host == currentHost }) {
+            results.append(await probe(url: current, bytes: 256 * 1024, session: quickSession))
+        }
+        return results
     }
 
     /// 起播用轻量测速，选出实测最快的 host；候选不足或全部失败时返回 nil。
@@ -151,7 +177,7 @@ enum CDNDiagnostics {
         let response = await session.request(url, headers: [
             "Range": "bytes=0-\(bytes - 1)",
             "Referer": Keys.referer,
-        ]).serializingData().response
+        ]).validate(statusCode: [206]).serializingData().response
 
         var setupTime: TimeInterval = 0
         var transferTime = response.metrics?.taskInterval.duration ?? 0

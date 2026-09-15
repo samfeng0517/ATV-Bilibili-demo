@@ -18,6 +18,8 @@ protocol CommonPlayerPlugin: NSObject {
     func playerDidChange(player: AVPlayer)
     func playerItemDidChange(playerItem: AVPlayerItem)
 
+    /// 接管 ready 後的起播流程，例如先恢復播放進度再播放。
+    var handlesPlaybackStart: Bool { get }
     func playerWillStart(player: AVPlayer)
     func playerDidStart(player: AVPlayer)
     func playerDidPause(player: AVPlayer)
@@ -31,6 +33,7 @@ extension CommonPlayerPlugin {
     func addViewToPlayerOverlay(container: UIView) {}
     func addMenuItems(current: inout [UIMenuElement]) -> [UIMenuElement] { return [] }
 
+    var handlesPlaybackStart: Bool { false }
     func playerWillStart(player: AVPlayer) {}
     func playerDidStart(player: AVPlayer) {}
     func playerDidPause(player: AVPlayer) {}
