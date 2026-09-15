@@ -267,12 +267,18 @@ extension CommonPlayerViewController {
 
     private func observePlayerItem(_ playerItem: AVPlayerItem) {
         observeSubtitleSelection(playerItem)
-        statusObserver = playerItem.observe(\.status, options: [.initial, .new, .old]) {
-            [weak self] item, change in
+        // KVO 不一定能將狀態列舉轉成 oldValue/newValue；兩者皆 nil 時也可能已 ready。
+        // 每個 item 分別記錄實際狀態，避免漏掉啟播或重複執行 ready hooks。
+        var lastObservedStatus: AVPlayerItem.Status?
+        statusObserver = playerItem.observe(\.status, options: [.initial, .new]) {
+            [weak self] item, _ in
             guard let self, let player = playerVC.player,
-                  player.currentItem === item, change.oldValue != change.newValue
+                  player.currentItem === item
             else { return }
-            switch item.status {
+            let status = item.status
+            guard lastObservedStatus != status else { return }
+            lastObservedStatus = status
+            switch status {
             case .readyToPlay:
                 isEnd = false
                 activePlugins.forEach { $0.playerWillStart(player: player) }
