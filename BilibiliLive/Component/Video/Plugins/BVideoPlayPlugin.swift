@@ -106,6 +106,12 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     private func showLoadingStatus(_ message: String?) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.showLoadingStatus(message)
+            }
+            return
+        }
         loadingStatusLabel?.text = message
         loadingStatusLabel?.isHidden = message == nil
     }
@@ -554,6 +560,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         lastDroppedFrames = 0
     }
 
+    @MainActor
     private func preparedMedia(urlInfo: VideoPlayURLInfo,
                                playerInfo: PlayerInfo?,
                                qualitySelection: BVideoQualitySelection,
