@@ -20,7 +20,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private let isMuted: Bool
     private let mediaWarmupManager: PlayerMediaWarmupManager?
     private var currentQualityId: Int?
-    private var pendingPlaybackStart: (time: CMTime, shouldResume: Bool)?
+    private var pendingPlaybackStart: (time: CMTime, shouldResume: Bool, alreadySeeked: Bool)?
     var handlesPlaybackStart: Bool { true }
     // 記錄最近一次實際使用的畫質模式，切換 CDN host 時原樣復用。
     private var currentQualitySelection = BVideoQualitySelection.settingsDefault
@@ -31,6 +31,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private var cdnProbeReport = ""
     private var isProbingCDN = false
     private var lastKnownPlaybackRate: Double
+    private weak var loadingStatusLabel: UILabel?
 
     // 运行时 CDN 健康检测：根据真实卡顿或 AVPlayer 的 keep-up 缓冲风险换 host，
     // 不单独用 observed/indicated 比特率比（indicated 常是峰值，低一些仍可能流畅）。
@@ -85,6 +86,37 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         return lines.joined(separator: "\n")
     }
 
+    func addViewToPlayerOverlay(container: UIView) {
+        let label = UILabel()
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        label.textColor = .white
+        label.font = .systemFont(ofSize: 24)
+        label.textAlignment = .center
+        label.layer.cornerRadius = 12
+        label.layer.masksToBounds = true
+        label.isHidden = true
+        container.addSubview(label)
+        label.snp.makeConstraints { make in
+            make.centerX.equalToSuperview()
+            make.bottom.equalToSuperview().inset(100)
+            make.width.equalTo(340)
+            make.height.equalTo(54)
+        }
+        loadingStatusLabel = label
+    }
+
+    private func showLoadingStatus(_ message: String?) {
+        loadingStatusLabel?.text = message
+        loadingStatusLabel?.isHidden = message == nil
+    }
+
+    func setPlaybackRate(_ rate: Float) {
+        lastKnownPlaybackRate = Double(rate)
+        if let player = playerVC?.player {
+            updateForwardBuffer(for: player)
+        }
+    }
+
     func playerDidLoad(playerVC: AVPlayerViewController) {
         self.playerVC = playerVC
         playerVC.player = nil
@@ -104,7 +136,9 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             else { return }
             player.pause()
             let restored: Bool
-            if start.time > .zero {
+            if start.alreadySeeked {
+                restored = true
+            } else if start.time > .zero {
                 restored = await player.seek(to: start.time,
                                              toleranceBefore: .zero,
                                              toleranceAfter: .zero)
@@ -121,6 +155,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             if start.shouldResume {
                 player.play()
             }
+            self.showLoadingStatus(nil)
         }
     }
 
@@ -162,10 +197,12 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         let currentHost = playerDelegate?.currentSegmentHost
         isProbingCDN = true
         cdnProbeReport = "CDN 测速中…"
+        showLoadingStatus("正在測試 CDN…")
         Task { @MainActor [weak self] in
             let report = await CDNDiagnostics.run(urls: candidates, currentHost: currentHost)
             self?.cdnProbeReport = report
             self?.isProbingCDN = false
+            self?.showLoadingStatus(nil)
         }
     }
 
@@ -324,7 +361,11 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         let candidates = playerDelegate?.cdnCandidates ?? []
         guard candidates.count > 1 else { return }
         isEvaluatingHostSwitch = true
-        defer { isEvaluatingHostSwitch = false }
+        showLoadingStatus("正在測試備援 CDN…")
+        defer {
+            isEvaluatingHostSwitch = false
+            if pendingPlaybackStart == nil { showLoadingStatus(nil) }
+        }
 
         Logger.info("[cdn] \(currentHost) 因卡顿重新测速 \(candidates.count) 个候选")
         let generation = loadGeneration
@@ -374,6 +415,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
         lastHostSwitchAt = Date()
         Logger.info("[cdn] 切换 host: \(currentHost) -> \(target.host) (实测\(String(format: "%.1f", targetMbps))Mbps, 需求\(String(format: "%.1f", requiredMbps))Mbps, \(reason))")
+        showLoadingStatus("正在切換 CDN…")
         await switchHost(to: target.host)
     }
 
@@ -415,6 +457,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
     func playerWillCleanUp(playerVC: AVPlayerViewController) {
         invalidatePendingLoad(tearingDown: true)
+        showLoadingStatus(nil)
     }
 
     private func startLoad(urlInfo: VideoPlayURLInfo,
@@ -457,6 +500,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         loadGeneration += 1
         playerDelegate = nil
         pendingPlaybackStart = nil
+        showLoadingStatus(nil)
         if tearingDown {
             playerVC = nil
         }
@@ -497,17 +541,17 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             }
         }
         let delegate = prepared.delegate
-        playerDelegate = delegate
-        currentQualitySelection = qualitySelection
-        lastStalls = 0
-        lastDroppedFrames = 0
 
         // AVKit 不允许在同一场全屏播放里反复切换该属性，因此只在首次装配资源时计算一次。
         if !isQualitySwitch {
             playerVC.appliesPreferredDisplayCriteriaAutomatically = shouldApplyContentMatch(delegate: delegate)
         }
 
-        await prepare(toPlay: prepared.asset, generation: generation, preservingPlayback: isQualitySwitch)
+        guard await prepare(toPlay: prepared.asset, generation: generation, preservingPlayback: isQualitySwitch) else { return }
+        playerDelegate = delegate
+        currentQualitySelection = qualitySelection
+        lastStalls = 0
+        lastDroppedFrames = 0
     }
 
     private func preparedMedia(urlInfo: VideoPlayURLInfo,
@@ -520,6 +564,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         if !isQualitySwitch,
            qualitySelection == .settingsDefault,
            resolvedPreferredHost == nil,
+           lastKnownPlaybackRate < 1.75,
            let mediaWarmupManager
         {
             return try await mediaWarmupManager.preparedMedia(for: playInfo)
@@ -529,7 +574,14 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         var resolvedHost = resolvedPreferredHost
         if resolvedHost == nil {
             let candidates = primaryCDNCandidates(from: urlInfo, qualitySelection: qualitySelection)
-            if let best = await CDNDiagnostics.pickFastestHost(urls: candidates) {
+            let bandwidth = BVideoUrlUtils.selectingVideos(from: urlInfo.dash.video, selection: qualitySelection)
+                .map(\.bandwidth).max() ?? 0
+            showLoadingStatus("正在測試 CDN…")
+            defer { showLoadingStatus(nil) }
+            if let best = await CDNDiagnostics.pickFastestHost(
+                urls: candidates,
+                requiredMbps: Double(bandwidth) * lastKnownPlaybackRate * throughputHeadroom / 1_000_000
+            ) {
                 resolvedHost = best
                 Logger.info("[cdn] 起播选用 host: \(best)")
             }
@@ -570,11 +622,11 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     @MainActor
-    private func prepare(toPlay asset: AVURLAsset, generation: Int, preservingPlayback: Bool) async {
+    private func prepare(toPlay asset: AVURLAsset, generation: Int, preservingPlayback: Bool) async -> Bool {
         guard loadGeneration == generation,
               !Task.isCancelled,
               let playerVC
-        else { return }
+        else { return false }
         let playerItem = AVPlayerItem(asset: asset)
 
         // 设置 preferredPeakBitRate 为一个很高的值，让 AVPlayer 优先选择高码率流
@@ -596,22 +648,40 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         guard loadGeneration == generation, !Task.isCancelled else {
             player.pause()
             player.replaceCurrentItem(with: nil)
-            return
+            return false
         }
-        // 準備新來源期間舊播放器仍可前進或被暫停，因此在替換前才擷取最新狀態。
+        // 舊播放器留在畫面上，等新來源跳到原進度後再交換，避免閃出影片開頭。
         if preservingPlayback, let oldPlayer = playerVC.player {
             let time = oldPlayer.currentTime()
-            pendingPlaybackStart = (time, oldPlayer.timeControlStatus != .paused)
+            let shouldResume = oldPlayer.timeControlStatus != .paused
+            oldPlayer.pause()
+            let seekTimeout = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard !Task.isCancelled else { return }
+                player.currentItem?.cancelPendingSeeks()
+            }
+            let restored = await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+            seekTimeout.cancel()
+            guard loadGeneration == generation, !Task.isCancelled,
+                  self.playerVC === playerVC, playerVC.player === oldPlayer, restored
+            else {
+                if shouldResume, playerVC.player === oldPlayer { oldPlayer.play() }
+                player.replaceCurrentItem(with: nil)
+                return false
+            }
+            player.isMuted = oldPlayer.isMuted
+            player.volume = oldPlayer.volume
+            pendingPlaybackStart = (time, shouldResume, true)
         } else {
             let seconds = max(0, playData.playerStartPos ?? 0)
-            pendingPlaybackStart = (CMTime(seconds: Double(seconds), preferredTimescale: 600), true)
+            pendingPlaybackStart = (CMTime(seconds: Double(seconds), preferredTimescale: 600), true, false)
         }
-        playerVC.player = nil
         guard loadGeneration == generation, !Task.isCancelled else {
             player.pause()
             player.replaceCurrentItem(with: nil)
-            return
+            return false
         }
         playerVC.player = player
+        return true
     }
 }

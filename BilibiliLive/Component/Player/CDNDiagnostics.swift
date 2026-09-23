@@ -114,25 +114,30 @@ enum CDNDiagnostics {
     }
 
     /// 起播用轻量测速，选出实测最快的 host；候选不足或全部失败时返回 nil。
-    static func pickFastestHost(urls: [String]) async -> String? {
+    static func pickFastestHost(urls: [String], requiredMbps: Double = 0) async -> String? {
         guard urls.count > 1 else {
             return urls.first.flatMap { URLComponents(string: $0)?.host }
         }
-        if let cachedHost = await quickProbeCache.cachedHost(in: urls, lifetime: quickProbeCacheLifetime) {
+        if requiredMbps < 8,
+           let cachedHost = await quickProbeCache.cachedHost(in: urls, lifetime: quickProbeCacheLifetime)
+        {
             Logger.info("[cdn] 起播沿用最近测速 host: \(cachedHost)")
             return cachedHost
         }
 
         // 起播测速与菜单里的完整测速目标不同：这里优先限制播放前的总等待时间。
         // 一次并行启动所有短请求，使最坏等待接近单个请求的超时，而不是「节点数 × 超时」。
-        let results = await probeConcurrently(urls: urls, bytes: quickProbeBytes, session: quickSession)
-        let ranked = results.sorted { ($0.mbps ?? -1) > ($1.mbps ?? -1) }
+        // 高倍速需要持續吞吐；加大樣本並計入連線時間，避免短暫突發速度
+        // 看似很快，播放幾秒後卻無法持續供應分片。
+        let probeBytes = requiredMbps >= 8 ? 256 * 1024 : quickProbeBytes
+        let results = await probeConcurrently(urls: urls, bytes: probeBytes, session: quickSession)
+        let ranked = results.sorted { ($0.effectiveMbps ?? -1) > ($1.effectiveMbps ?? -1) }
         let summary = ranked.map { r in
-            let speed = r.mbps.map { String(format: "%.1fMbps", $0) } ?? "失败"
+            let speed = r.effectiveMbps.map { String(format: "%.1fMbps", $0) } ?? "失败"
             return "\(r.host)=\(speed)"
         }.joined(separator: ", ")
-        Logger.info("[cdn] 起播并行轻量测速 (\(quickProbeBytes / 1024)KB): \(summary)")
-        let fastestHost = ranked.first(where: { $0.mbps != nil })?.host
+        Logger.info("[cdn] 起播并行轻量测速 (\(probeBytes / 1024)KB, 需求 \(String(format: "%.1f", requiredMbps))Mbps): \(summary)")
+        let fastestHost = ranked.first(where: { $0.effectiveMbps != nil })?.host
         if let fastestHost {
             await quickProbeCache.store(host: fastestHost)
         }

@@ -20,6 +20,13 @@ class CommonPlayerViewController: UIViewController {
     private var selectedSubtitleOption: AVMediaSelectionOption?
     private var subtitleSelectionGroup: AVMediaSelectionGroup?
     private var subtitleSelectionTask: Task<Void, Never>?
+    private var preferredSubtitleLanguage: String?
+    private var preferredSubtitleName: String?
+    private var audioSelectionTask: Task<Void, Never>?
+    private var audioSelectionGroup: AVMediaSelectionGroup?
+    private var preferredAudioLanguage: String?
+    private var preferredAudioName: String?
+    private var deferredLoadingDismiss = false
     private var isEnd = false
     private var isRestoringFromPip = false
     var showsPlaybackControls = true
@@ -179,6 +186,7 @@ class CommonPlayerViewController: UIViewController {
 
     private func cleanUpObserver() {
         cleanUpSubtitleSelection()
+        cleanUpAudioSelection()
         rateObserver = nil
         statusObserver = nil
         if let playToEndObserver {
@@ -195,6 +203,7 @@ class CommonPlayerViewController: UIViewController {
 extension CommonPlayerViewController {
     private func playerDidChange(player: AVPlayer?) {
         cleanUpSubtitleSelection()
+        cleanUpAudioSelection()
         if let player {
             activePlugins.forEach { $0.playerDidChange(player: player) }
             rateObserver = player.observe(\.rate, options: [.old, .new]) {
@@ -223,6 +232,31 @@ extension CommonPlayerViewController {
         selectedSubtitleOption = nil
     }
 
+    private func cleanUpAudioSelection() {
+        audioSelectionTask?.cancel()
+        audioSelectionTask = nil
+        audioSelectionGroup = nil
+    }
+
+    private func observeAudioSelection(_ item: AVPlayerItem) {
+        cleanUpAudioSelection()
+        guard playerVC.player?.appliesMediaSelectionCriteriaAutomatically == false else { return }
+        audioSelectionTask = Task { @MainActor [weak self, weak item] in
+            guard let item,
+                  let group = try? await item.asset.loadMediaSelectionGroup(for: .audible),
+                  !Task.isCancelled,
+                  let self, self.playerVC.player?.currentItem === item
+            else { return }
+            self.audioSelectionGroup = group
+            guard self.preferredAudioLanguage != nil || self.preferredAudioName != nil else { return }
+            let option = group.options.first { self.preferredAudioName != nil && $0.displayName == self.preferredAudioName } ??
+                group.options.first { self.preferredAudioLanguage != nil && $0.extendedLanguageTag == self.preferredAudioLanguage }
+            if let option {
+                item.select(option, in: group)
+            }
+        }
+    }
+
     private func observeSubtitleSelection(_ item: AVPlayerItem) {
         cleanUpSubtitleSelection()
         // 只管理明確停用自動媒體選擇的影片播放器，不介入直播等其他來源。
@@ -234,7 +268,10 @@ extension CommonPlayerViewController {
                   let self, self.playerVC.player?.currentItem === item
             else { return }
             self.subtitleSelectionGroup = group
-            self.selectedSubtitleOption = item.currentMediaSelection.selectedMediaOption(in: group)
+            let preferredOption = group.options.first { self.preferredSubtitleName != nil && $0.displayName == self.preferredSubtitleName } ??
+                group.options.first { self.preferredSubtitleLanguage != nil && $0.extendedLanguageTag == self.preferredSubtitleLanguage }
+            self.selectedSubtitleOption = preferredOption
+            item.select(preferredOption, in: group)
             self.subtitleSelectionObserver = NotificationCenter.default.addObserver(
                 forName: AVPlayerItem.mediaSelectionDidChangeNotification, object: item, queue: .main
             ) { [weak self, weak item] _ in
@@ -256,6 +293,7 @@ extension CommonPlayerViewController {
 
     private func playerRateDidChange(player: AVPlayer) {
         if player.rate > 0 {
+            deferredLoadingDismiss = false
             activePlugins.forEach { $0.playerDidStart(player: player) }
             playerDidStart(player: player)
         } else if player.rate == 0 {
@@ -267,6 +305,7 @@ extension CommonPlayerViewController {
 
     private func observePlayerItem(_ playerItem: AVPlayerItem) {
         observeSubtitleSelection(playerItem)
+        observeAudioSelection(playerItem)
         // KVO 不一定能將狀態列舉轉成 oldValue/newValue；兩者皆 nil 時也可能已 ready。
         // 每個 item 分別記錄實際狀態，避免漏掉啟播或重複執行 ready hooks。
         var lastObservedStatus: AVPlayerItem.Status?
@@ -318,18 +357,37 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
                               didSelect mediaSelectionOption: AVMediaSelectionOption?,
                               in mediaSelectionGroup: AVMediaSelectionGroup)
     {
-        guard subtitleSelectionObserver != nil,
-              let group = subtitleSelectionGroup,
-              group == mediaSelectionGroup
-        else { return }
-        // 只有字幕選單的明確操作更新偏好；系統暫時選取／取消字幕不改寫它。
-        selectedSubtitleOption = mediaSelectionOption
+        if subtitleSelectionObserver != nil,
+           let group = subtitleSelectionGroup,
+           group == mediaSelectionGroup
+        {
+            // 只有字幕選單的明確操作更新偏好；系統暫時選取／取消字幕不改寫它。
+            selectedSubtitleOption = mediaSelectionOption
+            preferredSubtitleLanguage = mediaSelectionOption?.extendedLanguageTag
+            preferredSubtitleName = mediaSelectionOption?.displayName
+        } else if let group = audioSelectionGroup, group == mediaSelectionGroup {
+            preferredAudioLanguage = mediaSelectionOption?.extendedLanguageTag
+            preferredAudioName = mediaSelectionOption?.displayName
+        }
     }
 
     @objc func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
         if let presentedViewController = UIViewController.topMostViewController() as? CommonPlayerViewController,
            presentedViewController.playerVC == playerViewController
         {
+            let player = playerViewController.player
+            let isLoading = player?.currentItem?.status != .readyToPlay ||
+                player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
+            if showsPlaybackControls, isLoading, !deferredLoadingDismiss {
+                // 載入中的第一次 Menu 用來收起 AVKit 控制介面；再按一次才離開。
+                deferredLoadingDismiss = true
+                playerViewController.showsPlaybackControls = false
+                DispatchQueue.main.async { [weak self, weak playerViewController] in
+                    guard let self, let playerViewController else { return }
+                    playerViewController.showsPlaybackControls = self.showsPlaybackControls
+                }
+                return false
+            }
             dismiss(animated: true)
             return false
         }

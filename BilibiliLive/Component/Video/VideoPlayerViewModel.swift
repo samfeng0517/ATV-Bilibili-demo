@@ -311,9 +311,10 @@ class VideoPlayerViewModel {
             playplugin?.networkDebugInfo ?? ""
         }
         let playSpeed = SpeedChangerPlugin(initialSpeed: currentPlaySpeed)
-        playSpeed.$currentPlaySpeed.sink { [weak self, weak danmu] speed in
+        playSpeed.$currentPlaySpeed.sink { [weak self, weak danmu, weak playplugin] speed in
             self?.currentPlaySpeed = speed
             danmu?.danMuView.playingSpeed = speed.value
+            playplugin?.setPlaybackRate(speed.value)
         }.store(in: &cancellable)
 
         let playlist = VideoPlayListPlugin(sequenceProvider: sequenceProvider)
