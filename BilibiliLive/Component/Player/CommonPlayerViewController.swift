@@ -26,7 +26,11 @@ class CommonPlayerViewController: UIViewController {
     private var audioSelectionGroup: AVMediaSelectionGroup?
     private var preferredAudioLanguage: String?
     private var preferredAudioName: String?
-    private var deferredLoadingDismiss = false
+    private let menuPressObserver = PlayerMenuPressObserver()
+    private var playbackBeforeMenuPress: PlayerMenuPlaybackSnapshot?
+    private var exitConfirmation = PlayerExitConfirmation()
+    private var exitConfirmationTimeout: DispatchWorkItem?
+    private let exitConfirmationView = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
     private var isEnd = false
     private var isRestoringFromPip = false
     var showsPlaybackControls = true
@@ -46,6 +50,12 @@ class CommonPlayerViewController: UIViewController {
         playerVC.allowsPictureInPicturePlayback = allowsPictureInPicturePlayback
         // 保留 AVKit 原生快轉、倒轉與連續操作的行為。
         playerVC.delegate = self
+        // 只觀察實體按鍵，不攔截 AVKit 收起控制列或子選單的 Menu 行為。
+        menuPressObserver.onMenuPressBegan = { [weak self] in
+            self?.capturePlaybackBeforeMenuPress()
+        }
+        view.addGestureRecognizer(menuPressObserver)
+        configureExitConfirmationView()
 
         let playerObservation = playerVC.observe(\.player, options: [.old, .new]) { [weak self] vc, obs in
             Logger.debug("player changed: \(String(describing: obs.oldValue)) -> \(String(describing: obs.newValue))")
@@ -60,6 +70,7 @@ class CommonPlayerViewController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        resetExitConfirmation()
         activePlugins.forEach { $0.playerDidDismiss(playerVC: playerVC) }
         cleanUpPlayerOnExit()
     }
@@ -198,6 +209,86 @@ class CommonPlayerViewController: UIViewController {
         }
         playbackStalledObserver = nil
     }
+
+    private func configureExitConfirmationView() {
+        exitConfirmationView.isUserInteractionEnabled = false
+        exitConfirmationView.layer.cornerRadius = 16
+        exitConfirmationView.clipsToBounds = true
+        exitConfirmationView.isHidden = true
+        let label = UILabel()
+        label.text = "再按一次返回，離開播放器"
+        label.font = .systemFont(ofSize: 28, weight: .medium)
+        label.textColor = .white
+        exitConfirmationView.contentView.addSubview(label)
+        label.snp.makeConstraints {
+            $0.horizontalEdges.equalToSuperview().inset(32)
+            $0.verticalEdges.equalToSuperview().inset(20)
+        }
+        view.addSubview(exitConfirmationView)
+        exitConfirmationView.snp.makeConstraints {
+            $0.centerX.equalToSuperview()
+            $0.bottom.equalTo(view.safeAreaLayoutGuide.snp.bottom).offset(-36)
+        }
+    }
+
+    private func requestExitConfirmation() {
+        guard UIViewController.topMostViewController() === self,
+              viewIfLoaded?.window != nil, !isBeingDismissed
+        else { return }
+        switch exitConfirmation.requestExit(at: ProcessInfo.processInfo.systemUptime,
+                                            menuPressID: menuPressObserver.lastMenuPressID)
+        {
+        case .showPrompt:
+            exitConfirmationView.isHidden = false
+            exitConfirmationTimeout?.cancel()
+            let timeout = DispatchWorkItem { [weak self] in
+                self?.resetExitConfirmation()
+            }
+            exitConfirmationTimeout = timeout
+            DispatchQueue.main.asyncAfter(deadline: .now() + PlayerExitConfirmation.timeout, execute: timeout)
+            restorePlaybackAfterCancelledExit()
+        case .exit:
+            resetExitConfirmation()
+            dismiss(animated: true)
+        case .ignore:
+            restorePlaybackAfterCancelledExit()
+        }
+    }
+
+    private func capturePlaybackBeforeMenuPress() {
+        playbackBeforeMenuPress = nil
+        guard UIViewController.topMostViewController() === self, !isEnd,
+              let player = playerVC.player, let item = player.currentItem,
+              player.rate != 0 || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        else { return }
+        // waiting 時 rate 可能為 0；defaultRate 保留 AVKit 選擇的播放倍速。
+        let rate = player.rate != 0 ? player.rate : player.defaultRate
+        playbackBeforeMenuPress = PlayerMenuPlaybackSnapshot(player: player, item: item,
+                                                             rate: rate, menuPressID: menuPressObserver.lastMenuPressID)
+    }
+
+    private func restorePlaybackAfterCancelledExit() {
+        let snapshot = playbackBeforeMenuPress
+        // 每次實體按鍵只消費一次，避免稍後重複 callback 蓋過使用者的暫停。
+        playbackBeforeMenuPress = nil
+        guard let snapshot, snapshot.menuPressID == menuPressObserver.lastMenuPressID,
+              let player = snapshot.player, let item = snapshot.item,
+              playerVC.player === player, player.currentItem === item,
+              player.rate == 0, player.timeControlStatus == .paused,
+              item.status != .failed, !isEnd, !isBeingDismissed,
+              viewIfLoaded?.window != nil, UIViewController.topMostViewController() === self
+        else { return }
+        // AVKit 可能先 pause 再詢問是否離開；取消離開時還原按鍵前的播放意圖。
+        player.rate = snapshot.rate
+    }
+
+    private func resetExitConfirmation() {
+        playbackBeforeMenuPress = nil
+        exitConfirmationTimeout?.cancel()
+        exitConfirmationTimeout = nil
+        exitConfirmation.reset()
+        exitConfirmationView.isHidden = true
+    }
 }
 
 extension CommonPlayerViewController {
@@ -293,7 +384,6 @@ extension CommonPlayerViewController {
 
     private func playerRateDidChange(player: AVPlayer) {
         if player.rate > 0 {
-            deferredLoadingDismiss = false
             activePlugins.forEach { $0.playerDidStart(player: player) }
             playerDidStart(player: player)
         } else if player.rate == 0 {
@@ -372,24 +462,11 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
     }
 
     @objc func playerViewControllerShouldDismiss(_ playerViewController: AVPlayerViewController) -> Bool {
-        if let presentedViewController = UIViewController.topMostViewController() as? CommonPlayerViewController,
-           presentedViewController.playerVC == playerViewController
-        {
-            let player = playerViewController.player
-            let isLoading = player?.currentItem?.status != .readyToPlay ||
-                player?.timeControlStatus == .waitingToPlayAtSpecifiedRate
-            if showsPlaybackControls, isLoading, !deferredLoadingDismiss {
-                // 載入中的第一次 Menu 用來收起 AVKit 控制介面；再按一次才離開。
-                deferredLoadingDismiss = true
-                playerViewController.showsPlaybackControls = false
-                DispatchQueue.main.async { [weak self, weak playerViewController] in
-                    guard let self, let playerViewController else { return }
-                    playerViewController.showsPlaybackControls = self.showsPlaybackControls
-                }
-                return false
-            }
-            dismiss(animated: true)
-            return false
+        guard playerViewController === playerVC else { return false }
+        // 等同一個按鍵事件傳遞完畢，再讀取 observer 記錄的 press ID。
+        // AVKit 即使在同一次按下／放開重複請求 dismiss，也不算第二次確認。
+        DispatchQueue.main.async { [weak self] in
+            self?.requestExitConfirmation()
         }
         return false
     }
@@ -399,6 +476,7 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
     }
 
     func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        resetExitConfirmation()
         isRestoringFromPip = false
         PipRecorder.shared.playingPipViewController.append(self)
     }
@@ -437,5 +515,74 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
     class PipRecorder {
         static let shared = PipRecorder()
         var playingPipViewController = [CommonPlayerViewController]()
+    }
+}
+
+/// 永遠不辨識成功，也不阻擋其他 recognizer；只替每次 Menu 按下編號。
+private final class PlayerMenuPressObserver: UIGestureRecognizer {
+    private(set) var lastMenuPressID: UInt64 = 0
+    var onMenuPressBegan: (() -> Void)?
+
+    init() {
+        super.init(target: nil, action: nil)
+        allowedTouchTypes = []
+        allowedPressTypes = [NSNumber(value: UIPress.PressType.menu.rawValue)]
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent) {
+        super.pressesBegan(presses, with: event)
+        if presses.contains(where: { $0.type == .menu }) {
+            lastMenuPressID &+= 1
+            onMenuPressBegan?()
+        }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent) {
+        super.pressesEnded(presses, with: event)
+        state = .failed
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent) {
+        super.pressesCancelled(presses, with: event)
+        state = .failed
+    }
+}
+
+private struct PlayerMenuPlaybackSnapshot {
+    weak var player: AVPlayer?
+    weak var item: AVPlayerItem?
+    let rate: Float
+    let menuPressID: UInt64
+}
+
+private struct PlayerExitConfirmation {
+    enum Result {
+        case showPrompt, ignore, exit
+    }
+
+    static let timeout: TimeInterval = 3
+    private var pendingPressID: UInt64?
+    private var expiresAt: TimeInterval = 0
+
+    mutating func requestExit(at now: TimeInterval, menuPressID: UInt64) -> Result {
+        if let pendingPressID, now < expiresAt {
+            guard menuPressID != pendingPressID else { return .ignore }
+            reset()
+            return .exit
+        }
+        pendingPressID = menuPressID
+        expiresAt = now + Self.timeout
+        return .showPrompt
+    }
+
+    mutating func reset() {
+        pendingPressID = nil
+        expiresAt = 0
     }
 }

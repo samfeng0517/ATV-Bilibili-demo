@@ -48,7 +48,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private let baseForwardBufferDuration: TimeInterval = 15
     private let maximumForwardBufferDuration: TimeInterval = 40
     /// CDN 实测吞吐至少要高于「平均码率 × 播放速度」一些，才能吸收分片峰值与网络抖动。
-    private let throughputHeadroom = 1.25
+    private let throughputHeadroom = 1.5
     private var loadTask: Task<Void, Never>?
     private var loadGeneration = 0
 
@@ -247,7 +247,9 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         let playbackRate = effectivePlaybackRate(for: player)
         let requiredMbps = requiredThroughputMbps(playbackRate: playbackRate)
         let stallDelta = stalls - lastStalls
-        Logger.info("playback host \(host) rate \(String(format: "%.2f", playbackRate))x required \(String(format: "%.1f", requiredMbps))Mbps observed \(observed)Mbps indicated \(indicated)Mbps effective \(effective)Mbps stalls \(stalls)(+\(stallDelta)) dropped \(dropped)(+\(dropped - lastDroppedFrames)) serverChanges \(event.numberOfServerAddressChanges) tcs \(tcs.rawValue) wait \(waiting) keepUp \(keepUp) buffered \(String(format: "%.1f", buffered))s")
+        let position = item.currentTime().seconds
+        let resolution = item.presentationSize
+        Logger.info("playback host \(host) rate \(String(format: "%.2f", playbackRate))x position \(String(format: "%.1f", position))s resolution \(Int(resolution.width))x\(Int(resolution.height)) required \(String(format: "%.1f", requiredMbps))Mbps observed \(observed)Mbps indicated \(indicated)Mbps effective \(effective)Mbps stalls \(stalls)(+\(stallDelta)) dropped \(dropped)(+\(dropped - lastDroppedFrames)) serverChanges \(event.numberOfServerAddressChanges) tcs \(tcs.rawValue) wait \(waiting) keepUp \(keepUp) buffered \(String(format: "%.1f", buffered))s")
         lastStalls = stalls
         lastDroppedFrames = dropped
 
@@ -284,7 +286,8 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     private func requiredThroughputMbps(playbackRate: Double) -> Double {
-        let averageBitrate = Double(playerDelegate?.primaryVideoBandwidth ?? 0)
+        let averageBitrate = Double((playerDelegate?.primaryVideoBandwidth ?? 0) +
+            PlayerMediaFactory.audioBandwidth(from: playData.videoPlayURLInfo))
         return averageBitrate * playbackRate * throughputHeadroom / 1_000_000
     }
 
@@ -375,6 +378,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
         Logger.info("[cdn] \(currentHost) 因卡顿重新测速 \(candidates.count) 个候选")
         let generation = loadGeneration
+        await CDNDiagnostics.invalidate(host: currentHost)
         let results = await CDNDiagnostics.probeForRecovery(urls: candidates, currentHost: currentHost, requiredMbps: requiredMbps)
         guard loadGeneration == generation, playerVC?.player != nil else { return }
         // 测速是异步的，期间用户可能已手动暂停；换源会重建 AVPlayer，必须取消
@@ -401,7 +405,11 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             Logger.info("[cdn] 没有其他可用候选，保持 \(currentHost)")
             return
         }
-        let currentMbps = ranked.first(where: { $0.host == currentHost })?.effectiveMbps
+        let currentProbeMbps = ranked.first(where: { $0.host == currentHost })?.effectiveMbps
+        let currentMbps = Self.recoveryComparisonMbps(
+            probedMbps: currentProbeMbps,
+            observedBitrate: playerVC?.player?.currentItem?.accessLog()?.events.last?.observedBitrate
+        )
         let reason: String
         if requiredMbps > 0, targetMbps >= requiredMbps,
            currentMbps.map({ $0 < requiredMbps }) ?? true
@@ -423,6 +431,14 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         Logger.info("[cdn] 切换 host: \(currentHost) -> \(target.host) (实测\(String(format: "%.1f", targetMbps))Mbps, 需求\(String(format: "%.1f", requiredMbps))Mbps, \(reason))")
         showLoadingStatus("正在切換 CDN…")
         await switchHost(to: target.host)
+    }
+
+    /// 已有緩衝風險時，熱檔頭的瞬間速度不能蓋過播放器實際下載吞吐。
+    private static func recoveryComparisonMbps(probedMbps: Double?, observedBitrate: Double?) -> Double? {
+        guard let probedMbps, let observedBitrate,
+              observedBitrate.isFinite, observedBitrate > 0
+        else { return probedMbps }
+        return min(probedMbps, observedBitrate / 1_000_000)
     }
 
     @MainActor
@@ -447,18 +463,6 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         guard reportWatchHistory else { return }
         guard let currentTime = playerVC.player?.currentTime().seconds, currentTime > 0 else { return }
         WebRequest.reportWatchHistory(aid: playData.aid, cid: playData.cid, currentTime: Int(currentTime), epid: playData.epid, seasonId: playData.seasonId, subType: playData.subType)
-    }
-
-    /// 与资源加载器选主视频流的逻辑对齐，取出该流各 CDN host 的代表 URL，供起播轻量测速。
-    private func primaryCDNCandidates(from info: VideoPlayURLInfo, qualitySelection: BVideoQualitySelection) -> [String] {
-        var videos = BVideoUrlUtils.selectingVideos(from: info.dash.video, selection: qualitySelection)
-        videos.sort { $0.bandwidth > $1.bandwidth }
-        guard let primary = videos.first else { return [] }
-        var seenHosts = Set<String>()
-        return primary.playableURLs.filter { url in
-            guard let host = URLComponents(string: url)?.host else { return false }
-            return seenHosts.insert(host).inserted
-        }
     }
 
     func playerWillCleanUp(playerVC: AVPlayerViewController) {
@@ -567,31 +571,26 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
                                preferredHost: String?,
                                isQualitySwitch: Bool) async throws -> PreparedPlayerMedia
     {
-        let resolvedPreferredHost = preferredHost ?? CDNNodeStore.fixedSelectedHost
+        // 所有起播路徑（含已暖機資源）先驗證目前影片與倍速需要的吞吐。
+        // 明確選定的節點與執行中的切換則維持指定 host。
+        var resolvedHost = preferredHost ?? CDNNodeStore.fixedSelectedHost
+        if resolvedHost == nil {
+            let candidates = PlayerMediaFactory.primaryCDNCandidates(from: urlInfo, qualitySelection: qualitySelection)
+            showLoadingStatus("正在選擇穩定 CDN…")
+            defer { showLoadingStatus(nil) }
+            resolvedHost = await CDNDiagnostics.pickFastestHost(
+                urls: candidates,
+                requiredMbps: PlayerMediaFactory.requiredThroughputMbps(from: urlInfo,
+                                                                        qualitySelection: qualitySelection,
+                                                                        playbackRate: lastKnownPlaybackRate)
+            )
+            try Task.checkCancellation()
+        }
         if !isQualitySwitch,
            qualitySelection == .settingsDefault,
-           resolvedPreferredHost == nil,
-           lastKnownPlaybackRate < 1.75,
-           let mediaWarmupManager
+           let resolvedHost, let mediaWarmupManager
         {
-            return try await mediaWarmupManager.preparedMedia(for: playInfo)
-        }
-
-        // 起播 / 切画质时做一次轻量测速选 host；运行时已指定 preferredHost 的切换则跳过。
-        var resolvedHost = resolvedPreferredHost
-        if resolvedHost == nil {
-            let candidates = primaryCDNCandidates(from: urlInfo, qualitySelection: qualitySelection)
-            let bandwidth = BVideoUrlUtils.selectingVideos(from: urlInfo.dash.video, selection: qualitySelection)
-                .map(\.bandwidth).max() ?? 0
-            showLoadingStatus("正在測試 CDN…")
-            defer { showLoadingStatus(nil) }
-            if let best = await CDNDiagnostics.pickFastestHost(
-                urls: candidates,
-                requiredMbps: Double(bandwidth) * lastKnownPlaybackRate * throughputHeadroom / 1_000_000
-            ) {
-                resolvedHost = best
-                Logger.info("[cdn] 起播选用 host: \(best)")
-            }
+            return try await mediaWarmupManager.preparedMedia(for: playInfo, preferredHost: resolvedHost)
         }
 
         return try await PlayerMediaFactory.prepare(aid: playData.aid,

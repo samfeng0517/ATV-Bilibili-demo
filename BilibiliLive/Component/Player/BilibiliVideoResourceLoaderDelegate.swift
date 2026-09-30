@@ -45,9 +45,16 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
     }
 
     struct PlaybackInfo {
+        enum Kind {
+            case video
+            case audio
+            case iFrame
+        }
+
         let info: VideoPlayURLInfo.DashInfo.DashMediaInfo
         let url: String
         let duration: Int
+        let kind: Kind
     }
 
     private var audioPlaylist = ""
@@ -73,12 +80,14 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
     private var aid = 0
     private(set) var httpPort = 0
     private(set) var isHDR = false
-    /// 首选视频流的全部 CDN 候选，按 host 去重，供 CDNDiagnostics 实测
+    /// 目前一般影片流的全部 CDN 候選，尚未請求影片播放清單時使用首選流。
     private(set) var cdnCandidates = [String]()
-    /// 首选视频流的声明带宽（bps），access log 的 indicatedBitrate 尚未就绪时作健康检测兜底
+    /// 目前一般影片流的宣告頻寬（bps），供健康檢測計算吞吐需求。
     private(set) var primaryVideoBandwidth = 0
-    /// 最近一次生成媒体播放列表时实际选用的分片 host
+    private var candidateVideoInfo: VideoPlayURLInfo.DashInfo.DashMediaInfo?
+    /// 最近一次一般影片播放清單實際選用的分片 host，不受音訊與預覽影格影響。
     private(set) var currentSegmentHost: String?
+    private(set) var prewarmedVideoHost: String?
     /// 播放中途检测到当前 host 吞吐撑不住时，外部（BVideoPlayPlugin）指定的优先 host，
     /// sidx 探测会把它排到候选队首，覆盖默认 URL 顺序
     private var preferredHost: String?
@@ -170,10 +179,11 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
 
         """
         masterPlaylist.append(content)
-        videoInfo.append(PlaybackInfo(info: info, url: url, duration: duration))
+        videoInfo.append(PlaybackInfo(info: info, url: url, duration: duration, kind: .video))
     }
 
     private func collectCDNCandidates(from video: VideoPlayURLInfo.DashInfo.DashMediaInfo?) {
+        candidateVideoInfo = video
         guard let video else {
             cdnCandidates = []
             primaryVideoBandwidth = 0
@@ -198,6 +208,20 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
         Logger.info("cdn candidates for qn \(video.id) (\(video.bandwidth / 1000)kbps):\n\(detail)")
     }
 
+    private func recordVideoPlayback(info: PlaybackInfo, segmentURL: String) {
+        guard case .video = info.kind else { return }
+        // AVPlayer 自動畫質可能選到不同流；測速 URL 與吞吐需求須跟著更新。
+        // 同一流可能有多個 variant URL，避免重複建立候選與列印日誌。
+        if candidateVideoInfo != info.info {
+            collectCDNCandidates(from: info.info)
+        }
+        let host = URLComponents(string: segmentURL)?.host
+        if currentSegmentHost != host {
+            currentSegmentHost = host
+            Logger.info("[CustomCDN] video segment host selected: \(host ?? "?")")
+        }
+    }
+
     private func getVideoPlayList(info: PlaybackInfo) async -> String {
         let sidxResult = await segmentInfoCache.sidx(from: info.info, preferredHost: preferredHost)
         let inits = info.info.segment_base.initialization.components(separatedBy: "-")
@@ -209,7 +233,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
               let sidxResult = sidxResult
         else {
             let fallbackHost = URLComponents(string: info.url)?.host ?? "?"
-            currentSegmentHost = fallbackHost
+            recordVideoPlayback(info: info, segmentURL: info.url)
             Logger.warn("[CustomCDN] SIDX unavailable; full-file fallback host: \(fallbackHost)")
             return """
             #EXTM3U
@@ -228,8 +252,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
         // 首选 CDN 挂掉时 segment 会整体切到探测成功的备用 URL
         let segment = sidxResult.sidx
         let segmentURL = sidxResult.url
-        currentSegmentHost = URLComponents(string: segmentURL)?.host
-        Logger.info("[CustomCDN] segment host selected: \(currentSegmentHost ?? "?")")
+        recordVideoPlayback(info: info, segmentURL: segmentURL)
         var playList = """
         #EXTM3U
         #EXT-X-VERSION:7
@@ -276,7 +299,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
         // 只有在真正添加音轨时才更新状态
         hasAudioInMasterListAdded = true
         audioRenditionIndex += 1
-        videoInfo.append(PlaybackInfo(info: info, url: url, duration: duration))
+        videoInfo.append(PlaybackInfo(info: info, url: url, duration: duration, kind: .audio))
     }
 
     private func addAudioPlayBackInfo(codec: String, bandwidth: Int, duration: Int, url: String) {
@@ -407,7 +430,7 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
 
             """
             masterPlaylist.append(media)
-            videoInfo.append(PlaybackInfo(info: video, url: url, duration: info.dash.duration))
+            videoInfo.append(PlaybackInfo(info: video, url: url, duration: info.dash.duration, kind: .iFrame))
         }
 
         masterPlaylist.append("\n#EXT-X-ENDLIST\n")
@@ -417,7 +440,8 @@ class BilibiliVideoResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelega
 
     func prewarmPrimaryVideoIndex() async {
         guard let firstVideo = videoInfo.first else { return }
-        _ = await segmentInfoCache.sidx(from: firstVideo.info, preferredHost: preferredHost)
+        let result = await segmentInfoCache.sidx(from: firstVideo.info, preferredHost: preferredHost)
+        prewarmedVideoHost = result.flatMap { URLComponents(string: $0.url)?.host }
     }
 
     func cancelPendingIndexLoads() {

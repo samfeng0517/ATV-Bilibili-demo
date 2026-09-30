@@ -19,6 +19,39 @@ final class PreparedPlayerMedia: @unchecked Sendable {
 }
 
 enum PlayerMediaFactory {
+    static func primaryCDNCandidates(from info: VideoPlayURLInfo,
+                                     qualitySelection: BVideoQualitySelection) -> [String]
+    {
+        let videos = BVideoUrlUtils.selectingVideos(from: info.dash.video, selection: qualitySelection)
+        guard let primary = videos.max(by: { $0.bandwidth < $1.bandwidth }) else { return [] }
+        let urls = primary.playableURLs
+        // 自訂清單再長，原始節點也要參與第一批初篩。
+        let ordered = Array(urls.prefix(2)) + primary.originalPlayableURLs + Array(urls.dropFirst(2))
+        var seen = Set<String>()
+        return ordered.filter { url in
+            guard let host = URLComponents(string: url)?.host else { return false }
+            return seen.insert(host).inserted
+        }
+    }
+
+    static func audioBandwidth(from info: VideoPlayURLInfo) -> Int {
+        var audios = info.dash.audio ?? []
+        if Settings.losslessAudio {
+            audios += info.dash.dolby?.audio ?? []
+            if let flac = info.dash.flac?.audio { audios.append(flac) }
+        }
+        return audios.map(\.bandwidth).max() ?? 0
+    }
+
+    static func requiredThroughputMbps(from info: VideoPlayURLInfo,
+                                       qualitySelection: BVideoQualitySelection,
+                                       playbackRate: Double) -> Double
+    {
+        let video = BVideoUrlUtils.selectingVideos(from: info.dash.video, selection: qualitySelection)
+            .map(\.bandwidth).max() ?? 0
+        return Double(video + audioBandwidth(from: info)) * playbackRate * 1.5 / 1_000_000
+    }
+
     static func prepare(aid: Int,
                         urlInfo: VideoPlayURLInfo,
                         playerInfo: PlayerInfo?,
@@ -72,21 +105,37 @@ actor PlayerMediaWarmupManager {
     }
 
     func preload(playInfo: PlayInfo) async {
-        _ = try? await preparedMedia(for: playInfo)
+        guard let resolved = try? await PlayInfoResolver.resolve(playInfo),
+              let snapshot = try? await playContextCache.context(for: resolved, mode: .regular),
+              !Task.isCancelled
+        else { return }
+        let info = snapshot.videoPlayURLInfo
+        let host = await CDNDiagnostics.cachedHost(
+            urls: PlayerMediaFactory.primaryCDNCandidates(from: info, qualitySelection: .settingsDefault),
+            requiredMbps: PlayerMediaFactory.requiredThroughputMbps(from: info,
+                                                                    qualitySelection: .settingsDefault,
+                                                                    playbackRate: Double(Settings.mediaPlayerSpeed.value))
+        )
+        guard let host, !Task.isCancelled else { return }
+        _ = try? await preparedMedia(for: resolved, preferredHost: host)
     }
 
-    func preparedMedia(for playInfo: PlayInfo) async throws -> PreparedPlayerMedia {
+    func preparedMedia(for playInfo: PlayInfo, preferredHost: String) async throws -> PreparedPlayerMedia {
         let generation = cancellationGeneration
         let resolvedPlayInfo = try await PlayInfoResolver.resolve(playInfo)
         try Task.checkCancellation()
         guard cancellationGeneration == generation else { throw CancellationError() }
-        let key = resolvedPlayInfo.sequenceKey
-        if let cached = prepared[key] {
+        let key = "\(resolvedPlayInfo.sequenceKey)::\(preferredHost)::\(BVideoQualitySelection.settingsDefault)"
+        if let cached = prepared[key], cached.delegate.prewarmedVideoHost == preferredHost {
             touch(key)
             return cached
         }
+        // 暖機期間若 SIDX 已回退到別的 host，不可冒用目前已驗證節點的資源。
+        prepared[key] = nil
         if let entry = inFlight[key] {
-            return try await resolve(entry, for: key)
+            let media = try await resolve(entry, for: key)
+            if media.delegate.prewarmedVideoHost == preferredHost { return media }
+            prepared[key] = nil
         }
 
         let token = UUID()
@@ -97,7 +146,8 @@ actor PlayerMediaWarmupManager {
             return try await PlayerMediaFactory.prepare(
                 aid: resolvedPlayInfo.aid,
                 urlInfo: snapshot.videoPlayURLInfo,
-                playerInfo: snapshot.playerInfo
+                playerInfo: snapshot.playerInfo,
+                preferredHost: preferredHost
             )
         }
 
