@@ -185,6 +185,7 @@ class VideoPlayerViewController: CommonPlayerViewController {
     private var neighborPreloadTask: Task<Void, Never>?
     private var currentRetryKey: String
     private var hasRetriedCurrentItem = false
+    private weak var stallRecoveryPlugin: BVideoPlayPlugin?
     private var isStopping = false
     private var pendingAutoTriggeredInfoActionKey: String?
 
@@ -238,7 +239,20 @@ class VideoPlayerViewController: CommonPlayerViewController {
             case let .success(plugins):
                 self?.neighborPreloadTask?.cancel()
                 self?.removeAllPlugins()
-                plugins.forEach { self?.addPlugin(plugin: $0) }
+                self?.stallRecoveryPlugin = nil
+                for plugin in plugins {
+                    if let recoveryPlugin = plugin as? BVideoPlayPlugin {
+                        self?.stallRecoveryPlugin = recoveryPlugin
+                        recoveryPlugin.onStallRecoveryFailure = { [weak self, weak recoveryPlugin] in
+                            guard let self, let recoveryPlugin,
+                                  self.stallRecoveryPlugin === recoveryPlugin,
+                                  !self.isStopping, self.playMode == .feedFlow
+                            else { return }
+                            self.attemptRetryOrShowRecovery(message: "播放卡住了，CDN 備援無法恢復，請選擇重試或切換下一條。")
+                        }
+                    }
+                    self?.addPlugin(plugin: plugin)
+                }
                 self?.neighborPreloadTask = Task { [weak self] in
                     await self?.viewModel.preloadNeighborsIfNeeded()
                 }
@@ -307,6 +321,8 @@ class VideoPlayerViewController: CommonPlayerViewController {
 
     override func playerDidStall(player: AVPlayer) {
         guard playMode == .feedFlow else { return }
+        // 由影片 plugin 等待持續卡頓、測試並切換 CDN；失敗才進入 feed 重試流程。
+        guard stallRecoveryPlugin == nil else { return }
         attemptRetryOrShowRecovery(message: "播放卡住了，请选择重试或切换下一条。")
     }
 

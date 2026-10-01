@@ -10,6 +10,7 @@ import UIKit
 
 class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     var onLoadFailure: ((String) -> Void)?
+    var onStallRecoveryFailure: (() -> Void)?
 
     private weak var playerVC: AVPlayerViewController?
     private var playerDelegate: BilibiliVideoResourceLoaderDelegate?
@@ -26,6 +27,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private var currentQualitySelection = BVideoQualitySelection.settingsDefault
 
     private var networkLogTimer: Timer?
+    private var lastNetworkLogAt: TimeInterval?
     private var lastStalls = 0
     private var lastDroppedFrames = 0
     private var cdnProbeReport = ""
@@ -33,15 +35,10 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private var lastKnownPlaybackRate: Double
     private weak var loadingStatusLabel: UILabel?
 
-    // 运行时 CDN 健康检测：根据真实卡顿或 AVPlayer 的 keep-up 缓冲风险换 host，
-    // 不单独用 observed/indicated 比特率比（indicated 常是峰值，低一些仍可能流畅）。
-    private var stallUnhealthyStreak = 0
+    private var stallMonitor = PlaybackStallMonitor()
     private var isEvaluatingHostSwitch = false
-    private var lastHostSwitchAt: Date?
-    /// 连续几次处于卡顿/等待缓冲才触发，避免单次抖动
-    private let stallTriggerCount = 2
-    /// 换完 host 后的冷静期，避免连续误触发
-    private let hostSwitchCooldown: TimeInterval = 30
+    private var hostRecoveryTask: Task<Void, Never>?
+    private var hostRecoveryID = 0
     private let networkLogInterval: TimeInterval = 5
     /// 以實際可播放時間設定緩衝；1.75x 以上提高到 20 秒，上限 40 媒體秒，
     /// 避免直接回到固定 60 秒而增加 seek 的分片請求負擔。
@@ -51,6 +48,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     private let throughputHeadroom = 1.5
     private var loadTask: Task<Void, Never>?
     private var loadGeneration = 0
+    private var preparingLoadGeneration: Int?
 
     init(playInfo: PlayInfo,
          detailData: PlayerDetailData,
@@ -72,6 +70,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
     deinit {
         networkLogTimer?.invalidate()
+        hostRecoveryTask?.cancel()
     }
 
     /// 供 DebugPlugin 浮层显示的网络诊断信息
@@ -170,8 +169,24 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         startNetworkLogging()
     }
 
+    func playerDidChange(player: AVPlayer) {
+        stallMonitor.resetPlayback()
+        // 起播就卡在 waiting 時未必有 playerDidStart 或 access log，仍須監測。
+        startNetworkLogging()
+    }
+
+    func playerDidStall(player: AVPlayer) {
+        checkPlaybackHealth()
+    }
+
+    func playerDidEnd(player: AVPlayer) {
+        stallMonitor.resetPlayback()
+        stopNetworkLogging()
+    }
+
     func playerDidCleanUp(player: AVPlayer) {
         stopNetworkLogging()
+        stallMonitor.resetPlayback()
         player.pause()
         player.replaceCurrentItem(with: nil)
     }
@@ -214,14 +229,23 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
 
     private func startNetworkLogging() {
         guard networkLogTimer == nil else { return }
-        networkLogTimer = Timer.scheduledTimer(withTimeInterval: networkLogInterval, repeats: true) { [weak self] _ in
-            self?.logNetworkStatus()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.checkPlaybackHealth()
+            let now = ProcessInfo.processInfo.systemUptime
+            if self.lastNetworkLogAt.map({ now - $0 >= self.networkLogInterval }) ?? true {
+                self.lastNetworkLogAt = now
+                self.logNetworkStatus()
+            }
         }
+        networkLogTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func stopNetworkLogging() {
         networkLogTimer?.invalidate()
         networkLogTimer = nil
+        lastNetworkLogAt = nil
     }
 
     private func logNetworkStatus() {
@@ -252,12 +276,6 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         Logger.info("playback host \(host) rate \(String(format: "%.2f", playbackRate))x position \(String(format: "%.1f", position))s resolution \(Int(resolution.width))x\(Int(resolution.height)) required \(String(format: "%.1f", requiredMbps))Mbps observed \(observed)Mbps indicated \(indicated)Mbps effective \(effective)Mbps stalls \(stalls)(+\(stallDelta)) dropped \(dropped)(+\(dropped - lastDroppedFrames)) serverChanges \(event.numberOfServerAddressChanges) tcs \(tcs.rawValue) wait \(waiting) keepUp \(keepUp) buffered \(String(format: "%.1f", buffered))s")
         lastStalls = stalls
         lastDroppedFrames = dropped
-
-        checkStallHealth(stallDelta: stallDelta,
-                         buffered: buffered,
-                         isLikelyToKeepUp: keepUp,
-                         playbackRate: playbackRate,
-                         currentHost: host)
     }
 
     /// 用户明确暂停（.paused）。卡缓冲/断网时是 .waitingToPlayAtSpecifiedRate，仍应做健康检测。
@@ -323,79 +341,79 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         return 0
     }
 
-    /// 根据真实卡顿或即将耗尽的缓冲触发换源；播放流畅时仅 observed < indicated
-    /// 不触发——indicated 常是峰值，低一些完全正常。
-    private func checkStallHealth(stallDelta: Int,
-                                  buffered: Double,
-                                  isLikelyToKeepUp: Bool,
-                                  playbackRate: Double,
-                                  currentHost: String)
-    {
-        guard !isUserPaused, !isEvaluatingHostSwitch else {
-            stallUnhealthyStreak = 0
-            return
-        }
-        if let lastSwitch = lastHostSwitchAt, Date().timeIntervalSince(lastSwitch) < hostSwitchCooldown {
-            return
-        }
+    private func checkPlaybackHealth() {
+        guard let player = playerVC?.player, let item = player.currentItem else { return }
+        let position = item.currentTime().seconds
+        let duration = item.duration.seconds
+        let hasEnded = duration.isFinite && position.isFinite && position >= duration
+        let shouldRecover = stallMonitor.shouldRecover(
+            at: ProcessInfo.processInfo.systemUptime,
+            position: position,
+            isPlayingOrWaiting: player.timeControlStatus != .paused &&
+                item.status != .failed && !hasEnded && pendingPlaybackStart == nil &&
+                preparingLoadGeneration == nil,
+            isRecovering: isEvaluatingHostSwitch
+        )
+        guard shouldRecover else { return }
 
-        // loadedTimeRanges 以媒体秒计。倍速越高，同样的媒体缓冲可支撑的墙钟时间越短；
-        // likelyToKeepUp 已转差且缓冲不足时提前处理，不必等到真正停住才开始测速。
-        let lowBufferThreshold = (playbackRate >= 1.75 ? 12 : 10) * playbackRate
-        let isRunningOutOfBuffer = !isLikelyToKeepUp && buffered < lowBufferThreshold
-        let unhealthy = isWaitingToPlay || stallDelta > 0 || isRunningOutOfBuffer
-        if unhealthy {
-            stallUnhealthyStreak += 1
-        } else {
-            stallUnhealthyStreak = 0
-            return
-        }
-        // access log 已確認新增 stall 時立即處理；waiting／keep-up 短暫抖動則仍需連續兩次，
-        // 避免使用者 seek 或剛起播時誤切 CDN。
-        let requiredStreak = stallDelta > 0 ? 1 : stallTriggerCount
-        guard stallUnhealthyStreak >= requiredStreak else { return }
-        stallUnhealthyStreak = 0
-
-        let requiredMbps = requiredThroughputMbps(playbackRate: playbackRate)
-        Logger.info("[cdn] 检测到缓冲风险 (rate=\(String(format: "%.2f", playbackRate))x, required=\(String(format: "%.1f", requiredMbps))Mbps, waiting=\(isWaitingToPlay), keepUp=\(isLikelyToKeepUp), stallDelta=\(stallDelta), buffered \(String(format: "%.1f", buffered))s)，重新测速")
-        Task { @MainActor [weak self] in
-            await self?.evaluateHostSwitch(currentHost: currentHost, requiredMbps: requiredMbps)
+        let currentHost = playerDelegate?.currentSegmentHost ?? playerDelegate?.prewarmedVideoHost ?? "-"
+        let requiredMbps = requiredThroughputMbps(playbackRate: effectivePlaybackRate(for: player))
+        Logger.info("[cdn] 播放進度持續 \(Int(stallMonitor.stallDuration)) 秒未推進，測試備援 (host=\(currentHost), waiting=\(isWaitingToPlay))")
+        // 先同步設旗標，避免 timer 與 stall notification 同時啟動兩次恢復。
+        isEvaluatingHostSwitch = true
+        hostRecoveryID += 1
+        let recoveryID = hostRecoveryID
+        hostRecoveryTask = Task { @MainActor [weak self] in
+            await self?.evaluateHostSwitch(currentHost: currentHost,
+                                           requiredMbps: requiredMbps,
+                                           stalledPosition: position,
+                                           recoveryID: recoveryID)
         }
     }
 
     @MainActor
-    private func evaluateHostSwitch(currentHost: String, requiredMbps: Double) async {
-        guard !isEvaluatingHostSwitch else { return }
-        guard !isUserPaused else { return }
-        let candidates = playerDelegate?.cdnCandidates ?? []
-        guard candidates.count > 1 else { return }
-        isEvaluatingHostSwitch = true
-        showLoadingStatus("正在測試備援 CDN…")
+    private func evaluateHostSwitch(currentHost: String,
+                                    requiredMbps: Double,
+                                    stalledPosition: Double,
+                                    recoveryID: Int) async
+    {
         defer {
-            isEvaluatingHostSwitch = false
-            if pendingPlaybackStart == nil { showLoadingStatus(nil) }
+            if hostRecoveryID == recoveryID {
+                isEvaluatingHostSwitch = false
+                hostRecoveryTask = nil
+                if pendingPlaybackStart == nil { showLoadingStatus(nil) }
+            }
         }
+        guard !Task.isCancelled, !isUserPaused else { return }
+        let candidates = playerDelegate?.cdnCandidates ?? []
+        guard candidates.contains(where: { URLComponents(string: $0)?.host != currentHost }) else {
+            onStallRecoveryFailure?()
+            return
+        }
+        showLoadingStatus("正在測試備援 CDN…")
 
         Logger.info("[cdn] \(currentHost) 因卡顿重新测速 \(candidates.count) 个候选")
         let generation = loadGeneration
         await CDNDiagnostics.invalidate(host: currentHost)
         let results = await CDNDiagnostics.probeForRecovery(urls: candidates, currentHost: currentHost, requiredMbps: requiredMbps)
-        guard loadGeneration == generation, playerVC?.player != nil else { return }
+        guard !Task.isCancelled, hostRecoveryID == recoveryID,
+              loadGeneration == generation, let player = playerVC?.player,
+              let item = player.currentItem, item.status != .failed
+        else { return }
         // 测速是异步的，期间用户可能已手动暂停；换源会重建 AVPlayer，必须取消
         guard !isUserPaused else {
             Logger.info("[cdn] 用户已暂停，取消 host 切换")
             return
         }
-        // 測速期間若下載已追上，就不再重建播放器造成一次額外緩衝。
-        if let player = playerVC?.player, let item = player.currentItem,
-           !isWaitingToPlay, item.isPlaybackLikelyToKeepUp,
-           bufferedSeconds(of: item) >= 10 * effectivePlaybackRate(for: player)
-        {
+        // 測速期間已恢復播放或使用者 seek，就取消舊位置的恢復，不額外重建播放器。
+        if PlaybackStallMonitor.positionChanged(from: stalledPosition, to: item.currentTime().seconds) {
+            stallMonitor.resetPlayback()
             return
         }
         let ranked = results.filter { $0.effectiveMbps != nil }.sorted { ($0.effectiveMbps ?? -1) > ($1.effectiveMbps ?? -1) }
         guard !ranked.isEmpty else {
             Logger.info("[cdn] 候选测速全部失败，保持 \(currentHost)")
+            onStallRecoveryFailure?()
             return
         }
 
@@ -403,6 +421,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         let alternate = ranked.first(where: { $0.host != currentHost })
         guard let target = alternate, let targetMbps = target.effectiveMbps else {
             Logger.info("[cdn] 没有其他可用候选，保持 \(currentHost)")
+            onStallRecoveryFailure?()
             return
         }
         let currentProbeMbps = ranked.first(where: { $0.host == currentHost })?.effectiveMbps
@@ -423,14 +442,17 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         } else if currentMbps == nil {
             reason = "当前节点测速失败"
         } else {
-            Logger.info("[cdn] 备选 \(target.host) (\(String(format: "%.1f", targetMbps))Mbps) 明显慢于当前 \(currentHost) (\(String(format: "%.1f", currentMbps!))Mbps)，保持")
-            return
+            // 目前節點已實際停住，短 Range 測速即使較高也不能否決可連線的備援。
+            reason = "持續卡頓，嘗試可用備援"
         }
 
-        lastHostSwitchAt = Date()
         Logger.info("[cdn] 切换 host: \(currentHost) -> \(target.host) (实测\(String(format: "%.1f", targetMbps))Mbps, 需求\(String(format: "%.1f", requiredMbps))Mbps, \(reason))")
         showLoadingStatus("正在切換 CDN…")
-        await switchHost(to: target.host)
+        if !(await switchHost(to: target.host)), !Task.isCancelled,
+           hostRecoveryID == recoveryID, !isUserPaused
+        {
+            onStallRecoveryFailure?()
+        }
     }
 
     /// 已有緩衝風險時，熱檔頭的瞬間速度不能蓋過播放器實際下載吞吐。
@@ -442,20 +464,22 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     @MainActor
-    private func switchHost(to host: String) async {
-        guard playerVC?.player != nil, !isUserPaused else { return }
+    private func switchHost(to host: String) async -> Bool {
+        guard let previousPlayer = playerVC?.player, !isUserPaused else { return false }
         do {
-            let generation = beginLoadGeneration()
+            let generation = beginLoadGeneration(cancelRecovery: false)
             try await playmedia(urlInfo: playData.videoPlayURLInfo,
                                 playerInfo: playData.playerInfo,
                                 generation: generation,
                                 qualitySelection: currentQualitySelection,
                                 preferredHost: host,
                                 isQualitySwitch: true)
+            return playerVC?.player !== previousPlayer
         } catch is CancellationError {
-            return
+            return false
         } catch {
             Logger.warn("[cdn] 切换 host 失败: \(error)")
+            return false
         }
     }
 
@@ -497,7 +521,15 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         }
     }
 
-    private func beginLoadGeneration() -> Int {
+    private func cancelHostRecovery() {
+        hostRecoveryTask?.cancel()
+        hostRecoveryTask = nil
+        hostRecoveryID += 1
+        isEvaluatingHostSwitch = false
+    }
+
+    private func beginLoadGeneration(cancelRecovery: Bool = true) -> Int {
+        if cancelRecovery { cancelHostRecovery() }
         loadTask?.cancel()
         loadTask = nil
         loadGeneration += 1
@@ -505,10 +537,12 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
     }
 
     private func invalidatePendingLoad(tearingDown: Bool) {
+        cancelHostRecovery()
         loadTask?.cancel()
         loadTask = nil
         loadGeneration += 1
         playerDelegate = nil
+        preparingLoadGeneration = nil
         pendingPlaybackStart = nil
         showLoadingStatus(nil)
         if tearingDown {
@@ -535,6 +569,10 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
                            isQualitySwitch: Bool = false) async throws
     {
         _ = try ensureActiveLoad(generation)
+        preparingLoadGeneration = generation
+        defer {
+            if preparingLoadGeneration == generation { preparingLoadGeneration = nil }
+        }
         let prepared = try await preparedMedia(urlInfo: urlInfo,
                                                playerInfo: playerInfo,
                                                qualitySelection: qualitySelection,
@@ -651,6 +689,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
         player.appliesMediaSelectionCriteriaAutomatically = false
         player.automaticallyWaitsToMinimizeStalling = minimizeStalling
         player.isMuted = isMuted
+        player.defaultRate = Float(lastKnownPlaybackRate)
         guard loadGeneration == generation, !Task.isCancelled else {
             player.pause()
             player.replaceCurrentItem(with: nil)
@@ -677,6 +716,7 @@ class BVideoPlayPlugin: NSObject, CommonPlayerPlugin {
             }
             player.isMuted = oldPlayer.isMuted
             player.volume = oldPlayer.volume
+            player.defaultRate = oldPlayer.defaultRate
             pendingPlaybackStart = (time, shouldResume, true)
         } else {
             let seconds = max(0, playData.playerStartPos ?? 0)
