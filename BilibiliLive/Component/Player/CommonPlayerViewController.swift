@@ -56,9 +56,11 @@ class CommonPlayerViewController: UIViewController {
         playerVC.delegate = self
         // 只觀察實體按鍵，不攔截 AVKit 收起控制列或子選單的 Menu 行為。
         menuPressObserver.onMenuPressBegan = { [weak self] in
+            self?.recordMenuPressForExitConfirmation()
             self?.capturePlaybackBeforeMenuPress()
         }
         menuPressObserver.onMenuPressEnded = { [weak self] in
+            self?.recordMenuPressForExitConfirmation()
             guard let self, let pressID = self.pendingExitRequestPressID else { return }
             self.pendingExitRequestPressID = nil
             // 放開按鍵後才允許離開，避免同一次 pressesEnded 落到下層頁面。
@@ -67,6 +69,7 @@ class CommonPlayerViewController: UIViewController {
             }
         }
         menuPressObserver.onMenuPressCancelled = { [weak self] in
+            self?.recordMenuPressForExitConfirmation()
             self?.pendingExitRequestPressID = nil
         }
         view.addGestureRecognizer(menuPressObserver)
@@ -128,7 +131,8 @@ class CommonPlayerViewController: UIViewController {
     }
 
     private var shouldConsumeMenuPress: Bool {
-        viewIfLoaded?.window != nil && UIViewController.topMostViewController() === self
+        // dismiss 動畫期間也要攔住餘下的返回事件，避免傳到下層頁面／系統。
+        viewIfLoaded?.window != nil && (isBeingDismissed || UIViewController.topMostViewController() === self)
     }
 
     private func pressesToForward(_ presses: Set<UIPress>) -> Set<UIPress> {
@@ -286,6 +290,11 @@ class CommonPlayerViewController: UIViewController {
             $0.centerX.equalToSuperview()
             $0.bottom.equalTo(view.safeAreaLayoutGuide.snp.bottom).offset(-36)
         }
+    }
+
+    private func recordMenuPressForExitConfirmation() {
+        exitConfirmation.recordMenuPress(at: ProcessInfo.processInfo.systemUptime,
+                                         menuPressID: menuPressObserver.lastMenuPressID)
     }
 
     private func requestExitConfirmation(menuPressID: UInt64) {
@@ -506,6 +515,25 @@ extension CommonPlayerViewController {
 }
 
 extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
+    func playerViewController(_ playerViewController: AVPlayerViewController,
+                              willTransitionToVisibilityOfTransportBar visible: Bool,
+                              with coordinator: AVPlayerViewControllerAnimationCoordinator)
+    {
+        guard playerViewController === playerVC else { return }
+        let transitionID = exitConfirmation.controlsWillTransition(
+            to: visible, at: ProcessInfo.processInfo.systemUptime,
+            menuPressID: menuPressObserver.lastMenuPressID
+        )
+        // 顯示／收起控制列會中斷先前的退出確認；保留播放快照供 AVKit 取消退出時還原。
+        pendingExitRequestPressID = nil
+        exitConfirmationTimeout?.cancel()
+        exitConfirmationTimeout = nil
+        exitConfirmationView.isHidden = true
+        coordinator.addCoordinatedAnimations(nil) { [weak self] _ in
+            self?.exitConfirmation.controlsDidTransition(transitionID, at: ProcessInfo.processInfo.systemUptime)
+        }
+    }
+
     func playerViewController(_ playerViewController: AVPlayerViewController,
                               didSelect mediaSelectionOption: AVMediaSelectionOption?,
                               in mediaSelectionGroup: AVMediaSelectionGroup)
