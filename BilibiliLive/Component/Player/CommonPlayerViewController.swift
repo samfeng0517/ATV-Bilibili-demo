@@ -28,11 +28,10 @@ class CommonPlayerViewController: UIViewController {
     private var preferredAudioName: String?
     private let menuPressObserver = PlayerMenuPressObserver()
     private var playbackBeforeMenuPress: PlayerMenuPlaybackSnapshot?
-    private var exitConfirmation = PlayerExitConfirmation()
-    private var exitConfirmationTimeout: DispatchWorkItem?
-    private var pendingExitRequestPressID: UInt64?
+    private weak var exitAlert: UIAlertController?
+    private var lastExitRequestPressID: UInt64 = 0
+    private var exitAlertClosedAt: TimeInterval = -.infinity
     private var consumesMenuPress = false
-    private let exitConfirmationView = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
     private var isEnd = false
     private var isRestoringFromPip = false
     var showsPlaybackControls = true
@@ -56,24 +55,9 @@ class CommonPlayerViewController: UIViewController {
         playerVC.delegate = self
         // 只觀察實體按鍵，不攔截 AVKit 收起控制列或子選單的 Menu 行為。
         menuPressObserver.onMenuPressBegan = { [weak self] in
-            self?.recordMenuPressForExitConfirmation()
             self?.capturePlaybackBeforeMenuPress()
         }
-        menuPressObserver.onMenuPressEnded = { [weak self] in
-            self?.recordMenuPressForExitConfirmation()
-            guard let self, let pressID = self.pendingExitRequestPressID else { return }
-            self.pendingExitRequestPressID = nil
-            // 放開按鍵後才允許離開，避免同一次 pressesEnded 落到下層頁面。
-            DispatchQueue.main.async { [weak self] in
-                self?.requestExitConfirmation(menuPressID: pressID)
-            }
-        }
-        menuPressObserver.onMenuPressCancelled = { [weak self] in
-            self?.recordMenuPressForExitConfirmation()
-            self?.pendingExitRequestPressID = nil
-        }
         view.addGestureRecognizer(menuPressObserver)
-        configureExitConfirmationView()
 
         let playerObservation = playerVC.observe(\.player, options: [.old, .new]) { [weak self] vc, obs in
             Logger.debug("player changed: \(String(describing: obs.oldValue)) -> \(String(describing: obs.newValue))")
@@ -88,6 +72,8 @@ class CommonPlayerViewController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        // 離開確認對話框蓋住播放器時不算離開，外掛的 dismiss hook 不能執行。
+        guard exitAlert == nil else { return }
         resetExitConfirmation()
         activePlugins.forEach { $0.playerDidDismiss(playerVC: playerVC) }
         cleanUpPlayerOnExit()
@@ -271,59 +257,39 @@ class CommonPlayerViewController: UIViewController {
         playbackStalledObserver = nil
     }
 
-    private func configureExitConfirmationView() {
-        exitConfirmationView.isUserInteractionEnabled = false
-        exitConfirmationView.layer.cornerRadius = 16
-        exitConfirmationView.clipsToBounds = true
-        exitConfirmationView.isHidden = true
-        let label = UILabel()
-        label.text = "再按一次返回，離開播放器"
-        label.font = .systemFont(ofSize: 28, weight: .medium)
-        label.textColor = .white
-        exitConfirmationView.contentView.addSubview(label)
-        label.snp.makeConstraints {
-            $0.horizontalEdges.equalToSuperview().inset(32)
-            $0.verticalEdges.equalToSuperview().inset(20)
-        }
-        view.addSubview(exitConfirmationView)
-        exitConfirmationView.snp.makeConstraints {
-            $0.centerX.equalToSuperview()
-            $0.bottom.equalTo(view.safeAreaLayoutGuide.snp.bottom).offset(-36)
-        }
-    }
-
-    private func recordMenuPressForExitConfirmation() {
-        exitConfirmation.recordMenuPress(at: ProcessInfo.processInfo.systemUptime,
-                                         menuPressID: menuPressObserver.lastMenuPressID)
-    }
-
+    /// 返回鍵只會開啟或關閉確認對話框；離開播放器必須移到「離開」再按確認鍵，
+    /// 連按返回因此不會退出播放，也不會把按鍵漏到下層頁面。
     private func requestExitConfirmation(menuPressID: UInt64) {
         guard UIViewController.topMostViewController() === self,
-              viewIfLoaded?.window != nil, !isBeingDismissed,
+              viewIfLoaded?.window != nil, !isBeingDismissed, exitAlert == nil,
               menuPressID == menuPressObserver.lastMenuPressID
         else { return }
-        if menuPressObserver.isMenuPressActive {
-            pendingExitRequestPressID = menuPressID
+        // AVKit 與 responder chain 可能為同一次按鍵各請求一次，只處理第一次。
+        if menuPressID != 0, menuPressID == lastExitRequestPressID { return }
+        lastExitRequestPressID = menuPressID
+        // 關閉對話框的那次返回不能立刻再開一個。
+        guard ProcessInfo.processInfo.systemUptime - exitAlertClosedAt > 0.5 else {
+            restorePlaybackAfterCancelledExit()
             return
         }
-        switch exitConfirmation.requestExit(at: ProcessInfo.processInfo.systemUptime,
-                                            menuPressID: menuPressID)
-        {
-        case .showPrompt:
-            exitConfirmationView.isHidden = false
-            exitConfirmationTimeout?.cancel()
-            let timeout = DispatchWorkItem { [weak self] in
-                self?.resetExitConfirmation()
-            }
-            exitConfirmationTimeout = timeout
-            DispatchQueue.main.asyncAfter(deadline: .now() + PlayerExitConfirmation.timeout, execute: timeout)
-            restorePlaybackAfterCancelledExit()
-        case .exit:
-            resetExitConfirmation()
-            dismiss(animated: true)
-        case .ignore:
-            restorePlaybackAfterCancelledExit()
+        let alert = UIAlertController(title: "離開播放？", message: nil, preferredStyle: .alert)
+        let exitAction = UIAlertAction(title: "離開", style: .default) { [weak self] _ in
+            self?.exitAlert = nil
+            self?.resetExitConfirmation()
+            self?.dismiss(animated: true)
         }
+        alert.addAction(exitAction)
+        let continueAction = UIAlertAction(title: "繼續播放", style: .cancel) { [weak self] _ in
+            self?.exitAlert = nil
+            self?.exitAlertClosedAt = ProcessInfo.processInfo.systemUptime
+        }
+        alert.addAction(continueAction)
+        // 預設焦點放在繼續播放，誤按確認鍵也不會離開。
+        alert.preferredAction = continueAction
+        exitAlert = alert
+        present(alert, animated: true)
+        // AVKit 可能先 pause 再詢問是否離開；對話框顯示期間維持原本的播放狀態。
+        restorePlaybackAfterCancelledExit()
     }
 
     private func capturePlaybackBeforeMenuPress() {
@@ -347,19 +313,16 @@ class CommonPlayerViewController: UIViewController {
               playerVC.player === player, player.currentItem === item,
               player.rate == 0, player.timeControlStatus == .paused,
               item.status != .failed, !isEnd, !isBeingDismissed,
-              viewIfLoaded?.window != nil, UIViewController.topMostViewController() === self
+              viewIfLoaded?.window != nil
         else { return }
-        // AVKit 可能先 pause 再詢問是否離開；取消離開時還原按鍵前的播放意圖。
+        // AVKit 可能先 pause 再詢問是否離開；未離開時還原按鍵前的播放意圖。
         player.rate = snapshot.rate
     }
 
     private func resetExitConfirmation() {
-        pendingExitRequestPressID = nil
         playbackBeforeMenuPress = nil
-        exitConfirmationTimeout?.cancel()
-        exitConfirmationTimeout = nil
-        exitConfirmation.reset()
-        exitConfirmationView.isHidden = true
+        exitAlert?.dismiss(animated: false)
+        exitAlert = nil
     }
 }
 
@@ -516,25 +479,6 @@ extension CommonPlayerViewController {
 
 extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
     func playerViewController(_ playerViewController: AVPlayerViewController,
-                              willTransitionToVisibilityOfTransportBar visible: Bool,
-                              with coordinator: AVPlayerViewControllerAnimationCoordinator)
-    {
-        guard playerViewController === playerVC else { return }
-        let transitionID = exitConfirmation.controlsWillTransition(
-            to: visible, at: ProcessInfo.processInfo.systemUptime,
-            menuPressID: menuPressObserver.lastMenuPressID
-        )
-        // 顯示／收起控制列會中斷先前的退出確認；保留播放快照供 AVKit 取消退出時還原。
-        pendingExitRequestPressID = nil
-        exitConfirmationTimeout?.cancel()
-        exitConfirmationTimeout = nil
-        exitConfirmationView.isHidden = true
-        coordinator.addCoordinatedAnimations(nil) { [weak self] _ in
-            self?.exitConfirmation.controlsDidTransition(transitionID, at: ProcessInfo.processInfo.systemUptime)
-        }
-    }
-
-    func playerViewController(_ playerViewController: AVPlayerViewController,
                               didSelect mediaSelectionOption: AVMediaSelectionOption?,
                               in mediaSelectionGroup: AVMediaSelectionGroup)
     {
@@ -617,10 +561,8 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
 private final class PlayerMenuPressObserver: UIGestureRecognizer {
     private(set) var lastMenuPressID: UInt64 = 0
     private(set) var lastMenuPressTimestamp: TimeInterval = .infinity
-    private(set) var isMenuPressActive = false
+    private var isMenuPressActive = false
     var onMenuPressBegan: (() -> Void)?
-    var onMenuPressEnded: (() -> Void)?
-    var onMenuPressCancelled: (() -> Void)?
 
     init() {
         super.init(target: nil, action: nil)
@@ -647,14 +589,12 @@ private final class PlayerMenuPressObserver: UIGestureRecognizer {
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent) {
         super.pressesEnded(presses, with: event)
         isMenuPressActive = false
-        onMenuPressEnded?()
         state = .failed
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent) {
         super.pressesCancelled(presses, with: event)
         isMenuPressActive = false
-        onMenuPressCancelled?()
         state = .failed
     }
 }
