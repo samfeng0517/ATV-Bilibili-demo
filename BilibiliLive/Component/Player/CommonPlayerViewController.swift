@@ -315,7 +315,7 @@ class CommonPlayerViewController: UIViewController {
         presentExitConfirmation()
     }
 
-    /// 返回鍵只會開啟或關閉確認對話框；離開播放器必須移到「離開」再按確認鍵，
+    /// 返回鍵只會開啟或關閉確認對話框；離開播放器必須按確認鍵，
     /// 連按返回因此不會退出播放，也不會把按鍵漏到下層頁面。
     private func presentExitConfirmation() {
         guard UIViewController.topMostViewController() === self,
@@ -341,8 +341,8 @@ class CommonPlayerViewController: UIViewController {
             self?.exitAlertClosedAt = ProcessInfo.processInfo.systemUptime
         }
         alert.addAction(continueAction)
-        // 預設焦點放在繼續播放，誤按確認鍵也不會離開。
-        alert.preferredAction = continueAction
+        // 預設焦點放在離開：返回後按確認鍵即可離開，連按返回仍只會開關對話框。
+        alert.preferredAction = exitAction
         exitAlert = alert
         present(alert, animated: true)
         // AVKit 可能先 pause 再詢問是否離開；對話框顯示期間維持原本的播放狀態。
