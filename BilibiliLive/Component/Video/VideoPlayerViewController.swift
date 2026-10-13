@@ -261,7 +261,7 @@ class VideoPlayerViewController: CommonPlayerViewController {
 
         if playMode == .regular {
             viewModel.onExit = { [weak self] in
-                self?.dismiss(animated: true)
+                self?.exitPlayer()
             }
         }
 
@@ -386,7 +386,7 @@ class VideoPlayerViewController: CommonPlayerViewController {
         alert.addAction(UIAlertAction(title: "下一条", style: .default) { [weak self] _ in
             Task { [weak self] in
                 if await self?.viewModel.playNextFromSequence() == false {
-                    self?.dismiss(animated: true)
+                    self?.exitPlayer()
                 }
             }
         })

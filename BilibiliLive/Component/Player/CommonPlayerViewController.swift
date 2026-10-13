@@ -32,6 +32,8 @@ class CommonPlayerViewController: UIViewController {
     private var lastExitRequestPressID: UInt64 = 0
     private var exitAlertClosedAt: TimeInterval = -.infinity
     private var consumesMenuPress = false
+    private var isExitAuthorized = false
+    private var isTransportBarVisible = false
     private var isEnd = false
     private var isRestoringFromPip = false
     var showsPlaybackControls = true
@@ -70,6 +72,51 @@ class CommonPlayerViewController: UIViewController {
         activePlugins.forEach { $0.playerDidLoad(playerVC: playerVC) }
     }
 
+    /// 關閉播放器的唯一入口；其餘的 dismiss 一律只會關閉播放器上層的頁面。
+    func exitPlayer(animated: Bool = true, completion: (() -> Void)? = nil) {
+        Logger.debug("[exit] exitPlayer")
+        isExitAuthorized = true
+        exitAlert = nil
+        if let presenter = presentingViewController {
+            presenter.dismiss(animated: animated, completion: completion)
+        } else {
+            super.dismiss(animated: animated, completion: completion)
+        }
+    }
+
+    // 未經 exitPlayer 授權的 dismiss 只能關閉播放器上層的頁面，不能關閉播放器：
+    // - tvOS 內建「返回鍵關閉 modal」的手勢會直接對播放器呼叫 dismiss。AVKit 平常會
+    //   先攔下返回鍵，但剛從控制列選單選完項目時不會，返回鍵就落到這個手勢上。
+    //   這種請求改為詢問是否離開，否則播放器會被直接關閉。
+    // - 上層頁面已在關閉途中時，轉交過來的 dismiss 也會變成關閉播放器，直接忽略。
+    override func dismiss(animated flag: Bool, completion: (() -> Void)? = nil) {
+        if let presented = presentedViewController, !presented.isBeingDismissed {
+            super.dismiss(animated: flag, completion: completion)
+            return
+        }
+        guard isExitAuthorized else {
+            if presentedViewController == nil {
+                let focused = UIFocusSystem.focusSystem(for: view)?.focusedItem.map { String(describing: type(of: $0)) } ?? "nil"
+                Logger.debug("[exit] system dismiss request, asking for confirmation; transportBar=\(isTransportBarVisible) focused=\(focused)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.presentExitConfirmation()
+                }
+            } else {
+                Logger.debug("[exit] ignored dismiss while the presented page is closing")
+            }
+            completion?()
+            return
+        }
+        super.dismiss(animated: flag, completion: completion)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if isBeingDismissed {
+            Logger.debug("[exit] player is being dismissed authorized=\(isExitAuthorized)")
+        }
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         // 離開確認對話框蓋住播放器時不算離開，外掛的 dismiss hook 不能執行。
@@ -86,7 +133,7 @@ class CommonPlayerViewController: UIViewController {
     // AVKit 的 gesture 仍可先收起控制列／子選單；未處理的 Menu 到達
     // 父容器後必須在此消耗，不能再交給 presenting controller 或系統。
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if shouldConsumeMenuPress, presses.contains(where: { $0.type == .menu }) {
+        if presses.contains(where: { $0.type == .menu }) {
             consumesMenuPress = true
         }
         let remaining = pressesToForward(presses)
@@ -101,9 +148,12 @@ class CommonPlayerViewController: UIViewController {
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         let remaining = pressesToForward(presses)
         if remaining.count != presses.count {
-            let pressID = menuPressObserver.lastMenuPressID
-            DispatchQueue.main.async { [weak self] in
-                self?.requestExitConfirmation(menuPressID: pressID)
+            // 上層還有選單或對話框在轉場時只吞掉按鍵，不視為離開請求。
+            if shouldRequestExitOnMenuPress {
+                let pressID = menuPressObserver.lastMenuPressID
+                DispatchQueue.main.async { [weak self] in
+                    self?.requestExitConfirmation(menuPressID: pressID)
+                }
             }
             consumesMenuPress = false
         }
@@ -116,14 +166,14 @@ class CommonPlayerViewController: UIViewController {
         if !remaining.isEmpty { super.pressesCancelled(remaining, with: event) }
     }
 
-    private var shouldConsumeMenuPress: Bool {
-        // dismiss 動畫期間也要攔住餘下的返回事件，避免傳到下層頁面／系統。
-        viewIfLoaded?.window != nil && (isBeingDismissed || UIViewController.topMostViewController() === self)
+    private var shouldRequestExitOnMenuPress: Bool {
+        viewIfLoaded?.window != nil && !isBeingDismissed && UIViewController.topMostViewController() === self
     }
 
+    // 播放器是全螢幕 modal：抵達容器的返回鍵一律在此消耗，交給上層 responder
+    // 只會讓 UIKit 關閉播放器或讓系統退出 app。
     private func pressesToForward(_ presses: Set<UIPress>) -> Set<UIPress> {
-        guard consumesMenuPress || shouldConsumeMenuPress else { return presses }
-        return Set(presses.filter { $0.type != .menu })
+        Set(presses.filter { $0.type != .menu })
     }
 
     func addPlugin(plugin: CommonPlayerPlugin) {
@@ -167,7 +217,7 @@ class CommonPlayerViewController: UIViewController {
         let alertController = UIAlertController(title: title, message: message, preferredStyle: .alert)
         let actionOk = UIAlertAction(title: "OK", style: .default) {
             [weak self] _ in
-            self?.dismiss(animated: true, completion: nil)
+            self?.exitPlayer()
         }
         alertController.addAction(actionOk)
         present(alertController, animated: true, completion: nil)
@@ -257,29 +307,36 @@ class CommonPlayerViewController: UIViewController {
         playbackStalledObserver = nil
     }
 
-    /// 返回鍵只會開啟或關閉確認對話框；離開播放器必須移到「離開」再按確認鍵，
-    /// 連按返回因此不會退出播放，也不會把按鍵漏到下層頁面。
     private func requestExitConfirmation(menuPressID: UInt64) {
-        guard UIViewController.topMostViewController() === self,
-              viewIfLoaded?.window != nil, !isBeingDismissed, exitAlert == nil,
-              menuPressID == menuPressObserver.lastMenuPressID
-        else { return }
+        guard menuPressID == menuPressObserver.lastMenuPressID else { return }
         // AVKit 與 responder chain 可能為同一次按鍵各請求一次，只處理第一次。
         if menuPressID != 0, menuPressID == lastExitRequestPressID { return }
         lastExitRequestPressID = menuPressID
+        presentExitConfirmation()
+    }
+
+    /// 返回鍵只會開啟或關閉確認對話框；離開播放器必須移到「離開」再按確認鍵，
+    /// 連按返回因此不會退出播放，也不會把按鍵漏到下層頁面。
+    private func presentExitConfirmation() {
+        guard UIViewController.topMostViewController() === self,
+              viewIfLoaded?.window != nil, !isBeingDismissed, exitAlert == nil
+        else { return }
         // 關閉對話框的那次返回不能立刻再開一個。
         guard ProcessInfo.processInfo.systemUptime - exitAlertClosedAt > 0.5 else {
             restorePlaybackAfterCancelledExit()
             return
         }
+        Logger.debug("[exit] show confirmation")
         let alert = UIAlertController(title: "離開播放？", message: nil, preferredStyle: .alert)
         let exitAction = UIAlertAction(title: "離開", style: .default) { [weak self] _ in
+            Logger.debug("[exit] alert action: exit")
             self?.exitAlert = nil
             self?.resetExitConfirmation()
-            self?.dismiss(animated: true)
+            self?.exitPlayer()
         }
         alert.addAction(exitAction)
         let continueAction = UIAlertAction(title: "繼續播放", style: .cancel) { [weak self] _ in
+            Logger.debug("[exit] alert action: continue")
             self?.exitAlert = nil
             self?.exitAlertClosedAt = ProcessInfo.processInfo.systemUptime
         }
@@ -479,6 +536,15 @@ extension CommonPlayerViewController {
 
 extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
     func playerViewController(_ playerViewController: AVPlayerViewController,
+                              willTransitionToVisibilityOfTransportBar visible: Bool,
+                              with coordinator: AVPlayerViewControllerAnimationCoordinator)
+    {
+        guard playerViewController === playerVC else { return }
+        isTransportBarVisible = visible
+        Logger.debug("[exit] transport bar visible=\(visible)")
+    }
+
+    func playerViewController(_ playerViewController: AVPlayerViewController,
                               didSelect mediaSelectionOption: AVMediaSelectionOption?,
                               in mediaSelectionGroup: AVMediaSelectionGroup)
     {
@@ -517,6 +583,8 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
     func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
         resetExitConfirmation()
         isRestoringFromPip = false
+        // AVKit 會在子母畫面開始時自行關閉播放器頁面。
+        isExitAuthorized = true
         PipRecorder.shared.playingPipViewController.append(self)
     }
 
@@ -538,13 +606,15 @@ extension CommonPlayerViewController: AVPlayerViewControllerDelegate {
             completionHandler(false)
             return
         }
-        if presentedViewController is CommonPlayerViewController {
-            let parent = presentedViewController.presentingViewController
-            presentedViewController.dismiss(animated: false) {
+        if let currentPlayer = presentedViewController as? CommonPlayerViewController {
+            let parent = currentPlayer.presentingViewController
+            currentPlayer.exitPlayer(animated: false) {
+                containerPlayer.isExitAuthorized = false
                 parent?.present(containerPlayer, animated: false)
                 completionHandler(true)
             }
         } else {
+            containerPlayer.isExitAuthorized = false
             presentedViewController.present(containerPlayer, animated: false) {
                 completionHandler(true)
             }

@@ -275,7 +275,7 @@ class BiliBiliUpnpDMR: NSObject {
             currentPlugin?.seek(to: json["seekTs"].doubleValue)
             session.sendEmpty()
         case "Stop":
-            (topMost as? CommonPlayerViewController)?.dismiss(animated: true)
+            (topMost as? CommonPlayerViewController)?.exitPlayer()
             session.sendEmpty()
         case "PlayUrl":
             let json = JSON(parseJSON: frame.body)
