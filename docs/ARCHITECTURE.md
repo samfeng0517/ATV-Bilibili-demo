@@ -9,6 +9,7 @@ The app uses a layered architecture with a factory-based navigation system:
 **Entry Point:** `AppDelegate.swift` initializes shared services. `SceneDelegate.swift` creates the scene's window and asks `AppDelegate` to check login state and route to either `LoginViewController` (QR code auth) or `BLTabBarViewController`. The app uses a single scene; `AppDelegate.window` retains access for existing navigation and casting flows. Foreground activation work runs from `SceneDelegate.sceneDidBecomeActive`.
 
 **Module Layer** (`BilibiliLive/Module/`) — Feature-specific view controllers:
+
 - `Tabbar/` — Root navigation; `BLTabBarViewController` uses `TabBarPageFactory` to create tab VCs dynamically based on user-customizable ordering
 - `Live/` — Live stream playback with `LiveDanMuProvider` for real-time danmaku over WebSocket + Brotli decompression
 - `Personal/` — User account, search, follows, history, settings, tab customization
@@ -16,12 +17,14 @@ The app uses a layered architecture with a factory-based navigation system:
 - `DLNA/` — UPnP Digital Media Renderer (`BiliBiliUpnpDMR`) for casting
 
 **Component Layer** (`BilibiliLive/Component/`) — Reusable subsystems:
+
 - `Player/` — `CommonPlayerViewController` is the base player. `BilibiliVideoResourceLoaderDelegate` implements custom MPEG-DASH resource loading (fetches manifests, parses SIDX segments, rewrites URLs for AVPlayer)
 - `Video/` — `VideoPlayerViewController` + `VideoPlayerViewModel` for regular video; `VideoDanmuProvider` + `VideoDanmuFilter` for video danmaku; `MaskProvider/` for danmaku anti-blocking
 - `Feed/` — `FeedCollectionViewController` / `FeedCollectionViewCell` for content discovery grids
 - `CommonPlayer/` — Local SPM package with shared player utilities
 
 **Request Layer** (`BilibiliLive/Request/`) — All API communication:
+
 - `WebRequest.swift` — Core HTTP layer (Alamofire-based)
 - `WebRequest+WbiSign.swift` — Request signing extension
 - `ApiRequest.swift` — Endpoint definitions, token refresh, MD5 signing, error handling (code `-101` = token expired)
@@ -49,10 +52,12 @@ The app uses a layered architecture with a factory-based navigation system:
 All interactive cells and buttons are built for tvOS focus engine — expect scale/parallax animations on focus as a baseline.
 
 **`BLButton`** — Base `UIControl` with blur background and focus-driven parallax + shadow. Use `onPrimaryAction` callback instead of `addTarget`.
+
 - **`BLCustomButton`** — Adds image + title label below, `isOn` toggle state, three image states (default / on / highlighted). IBDesignable.
 - **`BLCustomTextButton`** — Text-only variant; changes color on focus. Carries an optional `object: Any?` for associated data.
 
 **`BLMotionCollectionViewCell`** — Base `UICollectionViewCell` providing parallax tilt + scale-on-focus. All feed/settings cells subclass this. Override `setup()` for layout and set `scaleFactor` for zoom intensity.
+
 - **`BLSettingLineCollectionViewCell`** — Horizontal card, 40pt font, exposes `makeLayout()` static method returning a ready-made `NSCollectionLayoutSection` (70pt height, 0.9 group width).
 - **`BLTextOnlyCollectionViewCell`** — Dark blur card, centered multi-line label. scaleFactor = 1.15.
 
@@ -63,6 +68,7 @@ All interactive cells and buttons are built for tvOS focus engine — expect sca
 **`FeedCollectionViewController`** — Generic paginated feed controller backed by `UICollectionViewDiffableDataSource`.
 
 Key points for subclassing / use:
+
 - Items conform to **`DisplayData`** protocol: `title`, `ownerName`, `pic` (required); `avatar`, `date`, `overlay: DisplayOverlay?` (optional).
 - Use **`AnyDispplayData`** (type-erased wrapper) to mix heterogeneous `DisplayData` types in one feed.
 - Set `displayDatas` to replace content (auto-deduplicates); call `appendData(displayData:)` for pagination.
@@ -85,41 +91,41 @@ playerVC.updateMenus()   // rebuilds AVPlayerViewController info panel menus fro
 
 **`CommonPlayerPlugin`** protocol — all methods have empty default implementations, so adopt only what you need:
 
-| Method | When called |
-|---|---|
-| `playerDidLoad(playerVC:)` | Player container appeared |
-| `playerDidChange(player:)` | AVPlayer instance swapped |
-| `playerItemDidChange(playerItem:)` | New AVPlayerItem loaded |
-| `playerWillStart` / `playerDidStart` | Playback begins |
-| `playerDidPause` / `playerDidEnd` / `playerDidFail` | State transitions |
-| `playerDidCleanUp` | Player teardown |
-| `addViewToPlayerOverlay(container:)` | Add UI on top of video |
-| `addMenuItems(current:)` | Contribute items to info panel menu |
+| Method                                              | When called                         |
+| --------------------------------------------------- | ----------------------------------- |
+| `playerDidLoad(playerVC:)`                          | Player container appeared           |
+| `playerDidChange(player:)`                          | AVPlayer instance swapped           |
+| `playerItemDidChange(playerItem:)`                  | New AVPlayerItem loaded             |
+| `playerWillStart` / `playerDidStart`                | Playback begins                     |
+| `playerDidPause` / `playerDidEnd` / `playerDidFail` | State transitions                   |
+| `playerDidCleanUp`                                  | Player teardown                     |
+| `addViewToPlayerOverlay(container:)`                | Add UI on top of video              |
+| `addMenuItems(current:)`                            | Contribute items to info panel menu |
 
 **Existing plugins** (all in `Component/Player/`):
 
-| Plugin | Purpose |
-|---|---|
-| `URLPlayPlugin` | Sets up AVPlayer from URL with custom HTTP headers; `isLive` flag disables stall recovery |
-| `DanmuViewPlugin` | Renders danmaku via `DanmakuKit`; requires a `DanmuProviderProtocol`; adds menu items for visibility, duration (4/6/8s), AI filter level |
-| `SpeedChangerPlugin` | Playback speed (0.5×–2×) with pitch correction; persists to `Settings.mediaPlayerSpeed` |
-| `SponsorSkipPlugin` | Fetches SponsorBlock segments; two modes: auto-jump (5s preview) or manual tip button |
-| `MaskViewPlugin` | Delivers pixel buffers for danmaku anti-blocking masks via `MaskProvider` |
-| `DebugPlugin` | Overlay with bitrate, stall count, dropped frames; toggled via info panel menu |
+| Plugin               | Purpose                                                                                                                                  |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `URLPlayPlugin`      | Sets up AVPlayer from URL with custom HTTP headers; `isLive` flag disables stall recovery                                                |
+| `DanmuViewPlugin`    | Renders danmaku via `DanmakuKit`; requires a `DanmuProviderProtocol`; adds menu items for visibility, duration (4/6/8s), AI filter level |
+| `SpeedChangerPlugin` | Playback speed (0.5×–2×) with pitch correction; persists to `Settings.mediaPlayerSpeed`                                                  |
+| `SponsorSkipPlugin`  | Fetches SponsorBlock segments; two modes: auto-jump (5s preview) or manual tip button                                                    |
+| `MaskViewPlugin`     | Delivers pixel buffers for danmaku anti-blocking masks via `MaskProvider`                                                                |
+| `DebugPlugin`        | Overlay with bitrate, stall count, dropped frames; toggled via info panel menu                                                           |
 
 ### Closing the player and Back (Menu) handling
 
 Close a player only with `CommonPlayerViewController.exitPlayer()`. Do not call `dismiss(animated:)` on a player to close it: the override treats that call as an unhandled Back press, so the player stays open and no error is raised.
 
-| Situation | What `CommonPlayerViewController` does |
-|---|---|
-| `exitPlayer()` is called | Closes the player |
-| `dismiss` is called while a page is presented above the player | Closes that page only |
-| `dismiss` is called while the page above the player is already closing | Ignores the call |
-| `dismiss` is called with nothing presented and the transport bar visible | Hides the transport bar (`hideTransportBar()`) |
-| `dismiss` is called with nothing presented and the transport bar hidden | Handles it as a Back press on a clean screen (`handleExitRequest()`) |
-| Back press on a clean screen, 1 second or more after the controls closed | Calls `exitPlayer()` |
-| Back press on a clean screen, less than 1 second after the controls closed | Ignores the press and restarts the 1-second window |
+| Situation                                                                  | What `CommonPlayerViewController` does                               |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `exitPlayer()` is called                                                   | Closes the player                                                    |
+| `dismiss` is called while a page is presented above the player             | Closes that page only                                                |
+| `dismiss` is called while the page above the player is already closing     | Ignores the call                                                     |
+| `dismiss` is called with nothing presented and the transport bar visible   | Hides the transport bar (`hideTransportBar()`)                       |
+| `dismiss` is called with nothing presented and the transport bar hidden    | Handles it as a Back press on a clean screen (`handleExitRequest()`) |
+| Back press on a clean screen, 1 second or more after the controls closed   | Calls `exitPlayer()`                                                 |
+| Back press on a clean screen, less than 1 second after the controls closed | Ignores the press and restarts the 1-second window                   |
 
 Why `dismiss` is overridden: tvOS has a built-in gesture that calls `dismiss` on the modally presented player when nothing else handles the Menu press. `AVPlayerViewController` normally handles the press first. Right after the user picks an item from a transport bar menu (for example playback speed), the transport bar is still visible but focus is on AVKit's container view, and AVKit does not handle the press. Before the override, that press closed the player. `isModalInPresentation` does not prevent it on tvOS 27.
 
