@@ -28,6 +28,7 @@ class SearchResultViewController: UIViewController {
     private var showHistorySuggest = false
     private let hotSuggestLimit = 6
     private var hotSuggestsCache: [SuggestEntry] = []
+    weak var searchController: UISearchController?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -51,6 +52,15 @@ class SearchResultViewController: UIViewController {
                     await self.performSearch(key: key)
                 }
             }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // UIKit only calls the updater after the text changes, so an empty
+        // search page would otherwise stay blank until the user types.
+        if let searchController, searchController.searchBar.text?.isEmpty != false, !showHistorySuggest {
+            updateSearchResults(for: searchController)
+        }
     }
 
     @MainActor

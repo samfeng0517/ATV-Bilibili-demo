@@ -35,6 +35,7 @@ class TabBarPageVCFactory {
             let resultVC = SearchResultViewController()
             let searchVC = UISearchController(searchResultsController: resultVC)
             searchVC.searchResultsUpdater = resultVC
+            resultVC.searchController = searchVC
             vc = UISearchContainerViewController(searchController: searchVC)
         case .followBangumi:
             vc = FollowBangumiViewController()
@@ -48,13 +49,7 @@ class TabBarPageVCFactory {
             vc = WeeklyWatchViewController()
         }
 
-        switch page {
-        case .search:
-            vc.tabBarItem.image = UIImage(systemName: "magnifyingglass")
-            vc.tabBarItem.title = nil
-        default:
-            vc.tabBarItem.title = page.title
-        }
+        vc.tabBarItem.title = page.title
         vc.tabBarItem.accessibilityIdentifier = page.rawValue
         return vc
     }
