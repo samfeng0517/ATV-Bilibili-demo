@@ -15,5 +15,6 @@ tvOS 16.0+ 的 Bilibili 用戶端，使用 Swift 5.0+ 與 Xcode project。
 
 - 既有 tvOS 元件支援 focus engine；沿用 `BLButton`、`BLMotionCollectionViewCell` 等元件。`BLButton` 使用 `onPrimaryAction`。
 - 影片列表優先沿用 `StandardVideoCollectionViewController`；播放器擴充沿用 `CommonPlayerPlugin`。
+- 關閉播放器一律呼叫 `CommonPlayerViewController.exitPlayer()`。對播放器呼叫 `dismiss(animated:)` 不會關閉播放器，也不會報錯；原因見 [架構與元件參考](docs/ARCHITECTURE.md) 的「Closing the player and Back (Menu) handling」。
 - API、簽章、cookie 與帳號狀態沿用 Request layer 與 `AccountManager`；依端點使用既有簽章方式。
 - 修改導覽、Feed、播放器、彈幕或請求層時，按需閱讀 [架構與元件參考](docs/ARCHITECTURE.md) 對應章節；方法與精確數值以程式碼為準。

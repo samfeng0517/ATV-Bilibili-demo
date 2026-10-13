@@ -107,6 +107,34 @@ playerVC.updateMenus()   // rebuilds AVPlayerViewController info panel menus fro
 | `MaskViewPlugin` | Delivers pixel buffers for danmaku anti-blocking masks via `MaskProvider` |
 | `DebugPlugin` | Overlay with bitrate, stall count, dropped frames; toggled via info panel menu |
 
+### Closing the player and Back (Menu) handling
+
+Close a player only with `CommonPlayerViewController.exitPlayer()`. Do not call `dismiss(animated:)` on a player to close it: the override treats that call as an unhandled Back press, so the player stays open and no error is raised.
+
+| Situation | What `CommonPlayerViewController` does |
+|---|---|
+| `exitPlayer()` is called | Closes the player |
+| `dismiss` is called while a page is presented above the player | Closes that page only |
+| `dismiss` is called while the page above the player is already closing | Ignores the call |
+| `dismiss` is called with nothing presented and the transport bar visible | Hides the transport bar (`hideTransportBar()`) |
+| `dismiss` is called with nothing presented and the transport bar hidden | Handles it as a Back press on a clean screen (`handleExitRequest()`) |
+| Back press on a clean screen, 1 second or more after the controls closed | Calls `exitPlayer()` |
+| Back press on a clean screen, less than 1 second after the controls closed | Ignores the press and restarts the 1-second window |
+
+Why `dismiss` is overridden: tvOS has a built-in gesture that calls `dismiss` on the modally presented player when nothing else handles the Menu press. `AVPlayerViewController` normally handles the press first. Right after the user picks an item from a transport bar menu (for example playback speed), the transport bar is still visible but focus is on AVKit's container view, and AVKit does not handle the press. Before the override, that press closed the player. `isModalInPresentation` does not prevent it on tvOS 27.
+
+Why `hideTransportBar()` does not restore controls immediately: it hides the bar by setting `showsPlaybackControls` to `false`. Setting it back to `true` during playback makes AVKit show the bar again at once, so `PlayerInteractionObserver` restores it on the next remote interaction other than Menu.
+
+Diagnosing on a device: hiding the transport bar, ignoring a press or a `dismiss` call, and closing the player each write a `[exit]` line to the CocoaLumberjack file log. The race between AVKit and the tvOS gesture cannot be reproduced in the Simulator. Pull the log from a paired Apple TV with:
+
+```bash
+xcrun devicectl device info files --device <device-id> --domain-type appDataContainer \
+  --domain-identifier com.stormx.BilibiliLive --subdirectory Library/Caches/Logs
+xcrun devicectl device copy from --device <device-id> --domain-type appDataContainer \
+  --domain-identifier com.stormx.BilibiliLive \
+  --source "Library/Caches/Logs/<file>.log" --destination <local-path>
+```
+
 **Settings** (`Settings.swift`) — Global user preferences accessed via `@UserDefault` / `@UserDefaultCodable` property wrappers. Observable values (e.g. `Defaults.shared.$showDanmu`) integrate with Combine for reactive UI.
 
 ## Important Patterns
